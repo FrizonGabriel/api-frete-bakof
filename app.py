@@ -196,31 +196,53 @@ def calcula_valor_item(tamanho_peca_m: float, km: float, valor_km: float, tam_ca
 
 def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
     """
-    Protocolo de compatibilidade com a Tray (GET):
-      prods = "comp;larg;alt;cub;qty;peso;codigo;valor/..."
-    Retorna lista de itens já tipados.
+    Formato “compatível Tray”:
+      comp;larg;alt;cub;qty;peso;codigo;valor
+    Itens separados por '/' normalmente. Também aceitamos '|'.
+    Converte vírgula decimal para ponto e 'null'/'None' para 0.
     """
     itens: List[Dict[str, Any]] = []
     if not prods_str:
         return itens
-    for p in prods_str.split("/"):
-        p = p.strip()
-        if not p:
-            continue
+
+    # Normaliza separadores de item
+    blocos = []
+    for sep in ["/", "|"]:
+        if sep in prods_str:
+            blocos = [b for b in prods_str.split(sep) if b.strip()]
+            break
+    if not blocos:
+        blocos = [prods_str]
+
+    def norm_num(x):
+        if x is None:
+            return 0.0
+        s = str(x).strip().lower()
+        if s in ("", "null", "none", "nan"):
+            return 0.0
+        # vírgula -> ponto
+        s = s.replace(",", ".")
         try:
-            comp, larg, alt, cub, qty, peso, codigo, valor = p.split(";")
-            itens.append({
-                "comp": float(comp or 0),
-                "larg": float(larg or 0),
-                "alt":  float(alt or 0),
-                "cub":  float(cub or 0),
-                "qty":  int(float(qty or 0)),
-                "peso": float(peso or 0),
-                "codigo": codigo.strip(),
-                "valor": float(valor or 0),
-            })
+            return float(s)
         except Exception:
-            # ignora item mal formatado
+            return 0.0
+
+    for raw in blocos:
+        try:
+            comp, larg, alt, cub, qty, peso, codigo, valor = raw.split(";")
+            item = {
+                "comp": norm_num(comp),
+                "larg": norm_num(larg),
+                "alt":  norm_num(alt),
+                "cub":  norm_num(cub),
+                "qty":  int(norm_num(qty)) if norm_num(qty) > 0 else 1,
+                "peso": norm_num(peso),
+                "codigo": (codigo or "").strip(),
+                "valor": norm_num(valor),
+            }
+            itens.append(item)
+        except Exception:
+            # ignora linhas zoadas
             continue
     return itens
 
@@ -317,3 +339,4 @@ def frete():
 if __name__ == "__main__":
     # Para debug local: http://127.0.0.1:8000/health
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
