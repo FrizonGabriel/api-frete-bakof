@@ -4,22 +4,32 @@ from typing import Dict, Any, List, Tuple, Optional
 import pandas as pd
 from flask import Flask, request, Response
 
-# ==========================
-# CONFIG
-# ==========================
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
 TOKEN_SECRETO = os.getenv("TOKEN_SECRETO", "teste123")
 ARQ_PLANILHA = os.getenv("PLANILHA_FRETE", "tabela de frete atualizada(2)(Recuperado Automaticamente).xlsx")
 
 DEFAULT_VALOR_KM = float(os.getenv("DEFAULT_VALOR_KM", "7.0"))
 DEFAULT_TAM_CAMINHAO = float(os.getenv("DEFAULT_TAM_CAMINHAO", "8.5"))   # metros úteis
-DEFAULT_KM = float(os.getenv("DEFAULT_KM", "100.0"))                      # fallback final
+DEFAULT_KM = float(os.getenv("DEFAULT_KM", "100.0"))                      # fallback final se nada casar
 
+# CDs / Unidades de saída (abreviações usadas na query `origem=`)
+ORIGENS = {
+    "fw":  {"nome": "Frederico Westphalen-RS", "cep": "98400000", "uf": "RS", "sheet": "FAIXAS_FW"},
+    "cg":  {"nome": "Campo Grande-MS",        "cep": "79108630", "uf": "MS", "sheet": "FAIXAS_CG"},
+    "ta":  {"nome": "Tauá-CE",                "cep": "63660000", "uf": "CE", "sheet": "FAIXAS_TA"},
+    "joi": {"nome": "Joinville-SC",           "cep": "89239250", "uf": "SC", "sheet": "FAIXAS_JOI"},
+    "moc": {"nome": "Montes Claros-MG",       "cep": "39404627", "uf": "MG", "sheet": "FAIXAS_MOC"},
+}
+
+# Palavras para ignorar linhas/cabeçalhos ao ler cadastro
 PALAVRAS_IGNORAR = {
     "VALOR KM","TAMANHO CAMINHAO","TAMANHO CAMINHÃO",
     "CALCULO DE FRETE POR TAMANHO DE PEÇA","CÁLCULO DE FRETE POR TAMANHO DE PEÇA"
 }
 
-# Estimativas de distância (km) saindo de Frederico Westphalen/RS (usado só como fallback por UF)
+# Estimativas de distância (km) por UF (usado só como fallback por UF)
 KM_APROX_POR_UF = {
     "RS": 150, "SC": 450, "PR": 700, "SP": 1100, "RJ": 1500, "MG": 1600, "ES": 1800,
     "MS": 1600, "MT": 2200, "DF": 2000, "GO": 2100, "TO": 2500, "BA": 2600, "SE": 2700,
@@ -27,6 +37,7 @@ KM_APROX_POR_UF = {
     "PA": 3800, "AP": 4100, "AM": 4200, "RO": 4000, "AC": 4300, "RR": 4500,
 }
 
+# Faixas de CEP por UF para fallback UF
 UF_CEP_RANGES = [
     ("SP", "01000000", "19999999"),
     ("RJ", "20000000", "28999999"),
@@ -58,9 +69,9 @@ UF_CEP_RANGES = [
 
 app = Flask(__name__)
 
-# ==========================
+# =========================================================
 # HELPERS
-# ==========================
+# =========================================================
 def limpar_texto(nome: Any) -> str:
     if not isinstance(nome, str): return ""
     return " ".join(nome.replace("\n"," ").split()).strip()
@@ -69,7 +80,7 @@ def so_digitos(cep: Any) -> str:
     s = re.sub(r"\D","", str(cep or ""))
     return s[:8] if len(s) >= 8 else s.zfill(8)
 
-def uf_por_cep(cep8: str) -> str | None:
+def uf_por_cep(cep8: str) -> Optional[str]:
     try:
         n = int(cep8)
     except Exception:
@@ -93,11 +104,10 @@ def extrai_constante(sheet_raw: pd.DataFrame, chave: str, default: float) -> flo
                     pass
     return default
 
-# ==========================
+# =========================================================
 # LEITURA DA PLANILHA
-# ==========================
+# =========================================================
 def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
-    # tenta abas mais comuns
     for aba in ("D", "BASE_CALCULO", "BASE", "CONSTANTES"):
         try:
             raw = pd.read_excel(xls, aba, header=None)
@@ -107,11 +117,9 @@ def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
             }
         except Exception:
             continue
-    # fallback
     return {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO}
 
 def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
-    # tenta achar aba com cadastro
     sheet = None
     for aba in ("CADASTRO_PRODUTO","CADASTRO","PRODUTOS"):
         if aba in xls.sheet_names:
@@ -120,7 +128,6 @@ def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
         return pd.DataFrame(columns=["nome","dim1","dim2"])
 
     raw = pd.read_excel(xls, sheet, header=None)
-    # Heurística simples de posições
     nome_col = 2 if raw.shape[1] > 2 else 0
     dim1_col = 3 if raw.shape[1] > 3 else (1 if raw.shape[1] > 1 else 0)
     dim2_col = 4 if raw.shape[1] > 4 else (2 if raw.shape[1] > 2 else 1)
@@ -178,7 +185,8 @@ def detectar_colunas(df: pd.DataFrame) -> Tuple[Optional[int],Optional[int],Opti
         if idx_km  is None and match(str(c), COL_KM):     idx_km  = i
     return idx_ini, idx_fim, idx_km
 
-def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
+def coletar_faixas_cep_km(xls: pd.ExcelFile, sheet_name: Optional[str]=None) -> List[Tuple[str,str,float]]:
+    """Lê faixas de uma aba específica. Se sheet_name=None, varre todas e agrega."""
     faixas: List[Tuple[str,str,float]] = []
 
     def primeiro_km_valido(vals):
@@ -199,7 +207,6 @@ def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
     def extrai_ceps_de_texto(s: Any) -> Optional[Tuple[str,str]]:
         if not isinstance(s, str):
             return None
-        # aceita formatos: "39300-000 → 39529-999", "39300-000 a 39529-999", etc.
         m = re.search(r"(\d{5}-?\d{3}).*?(\d{5}-?\d{3})", s)
         if m:
             a = so_digitos(m.group(1))
@@ -208,7 +215,10 @@ def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
                 return a,b
         return None
 
-    for sheet in xls.sheet_names:
+    sheets = [sheet_name] if sheet_name else list(xls.sheet_names)
+    for sheet in sheets:
+        if sheet is None or sheet not in xls.sheet_names:
+            continue
         try:
             df = pd.read_excel(xls, sheet, dtype=str)
         except Exception:
@@ -216,7 +226,7 @@ def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
         if df.empty: 
             continue
 
-        # 1) tenta colunas clássicas
+        # 1) colunas típicas
         ini, fim, km = detectar_colunas(df)
         if None not in (ini, fim, km):
             sub = df.iloc[:, [ini, fim, km]]
@@ -228,7 +238,7 @@ def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
                     faixas.append((a, b, float(kv)))
             continue
 
-        # 2) fallback: uma coluna texto com 2 CEPs + qualquer coluna numérica p/ KM
+        # 2) fallback: texto + qualquer coluna numérica p/ KM
         for _, row in df.iterrows():
             vals = list(row.values)
             ab = None
@@ -272,7 +282,7 @@ def km_por_cep(faixas: List[Tuple[str,str,float]], cep_dest: str) -> Tuple[float
             elif n > nb: lo = mid + 1
             else: return float(k), "faixa"
 
-        # não bateu: escolhe faixa mais próxima (bordas)
+        # mais próxima
         cand = []
         if 0 <= hi < len(faixas):
             a,b,k = faixas[hi]
@@ -292,30 +302,44 @@ def km_por_cep(faixas: List[Tuple[str,str,float]], cep_dest: str) -> Tuple[float
 
     return DEFAULT_KM, "default"
 
-# ==========================
+# =========================================================
 # CARREGAMENTO INICIAL
-# ==========================
+# =========================================================
 def carregar_tudo() -> Dict[str, Any]:
     xls = pd.ExcelFile(ARQ_PLANILHA)
+
     consts = carregar_constantes(xls)
     cadastro = carregar_cadastro_produtos(xls)
     catalogo = montar_catalogo_tamanho(cadastro)
-    faixas = coletar_faixas_cep_km(xls)
-    return {"consts": consts, "catalogo": catalogo, "faixas": faixas}
+
+    # faixas gerais (qualquer aba que contenha faixas)
+    faixas_gerais = coletar_faixas_cep_km(xls, None)
+
+    # faixas por origem (se as abas específicas existirem)
+    faixas_by_origem: Dict[str, List[Tuple[str,str,float]]] = {}
+    for key, meta in ORIGENS.items():
+        sheet = meta.get("sheet")
+        if sheet and sheet in xls.sheet_names:
+            faixas_by_origem[key] = coletar_faixas_cep_km(xls, sheet)
+        else:
+            # fallback usa as gerais
+            faixas_by_origem[key] = faixas_gerais
+
+    return {"consts": consts, "catalogo": catalogo, "faixas_gerais": faixas_gerais, "faixas_by_origem": faixas_by_origem}
 
 try:
     DATA = carregar_tudo()
-    print(f"[INIT] Constantes: {DATA['consts']}, Itens catálogo: {len(DATA['catalogo'])}, Faixas: {len(DATA['faixas'])}")
+    print(f"[INIT] Constantes: {DATA['consts']}, Itens catálogo: {len(DATA['catalogo'])}, Faixas gerais: {len(DATA['faixas_gerais'])}")
 except Exception as e:
     DATA = {
         "consts": {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO},
-        "catalogo": {}, "faixas": []
+        "catalogo": {}, "faixas_gerais": [], "faixas_by_origem": {k: [] for k in ORIGENS.keys()}
     }
     print(f"[WARN] Falha ao carregar planilha: {e}")
 
-# ==========================
+# =========================================================
 # CÁLCULO
-# ==========================
+# =========================================================
 def calcula_valor_item(tamanho_peca_m: float, km: float, valor_km: float, tam_caminhao: float) -> float:
     ocupacao = max(0.01, float(tamanho_peca_m)/float(tam_caminhao))
     valor_km_item = float(valor_km) * ocupacao
@@ -341,12 +365,12 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
         except Exception: return 0.0
 
     def cm_to_m(x):
-        # heurística: Tray costuma mandar cm; se >10, interpretamos como cm
+        # heurística: se >10, assume cm e converte para metros
         return x/100.0 if x and x > 10 else x
 
     for raw in blocos:
         try:
-            # comp;larg;alt;cub;qty;peso;codigo;valor   (código pode ser o "nome" também)
+            # comp;larg;alt;cub;qty;peso;codigo;valor
             comp, larg, alt, cub, qty, peso, codigo, valor = raw.split(";")
             comp_v = cm_to_m(norm_num(comp))
             larg_v = cm_to_m(norm_num(larg))
@@ -366,40 +390,78 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
             continue
     return itens
 
-# ==========================
+def melhor_origem_para(cep_dest: str) -> Tuple[str, float, str]:
+    """
+    Decide automaticamente qual origem retornar (key da ORIGENS),
+    com o menor KM considerando faixas por origem e fallback.
+    Retorna (origem_key, km, fonte_km).
+    """
+    best_key = "fw"
+    best_km = None
+    best_fonte = "default"
+
+    for key in ORIGENS.keys():
+        faixas = DATA["faixas_by_origem"].get(key, [])
+        km, fonte = km_por_cep(faixas, cep_dest)
+        if best_km is None or km < best_km:
+            best_key, best_km, best_fonte = key, km, fonte
+
+    # segurança
+    if best_km is None:
+        best_key, best_km, best_fonte = "fw", DEFAULT_KM, "default"
+
+    return best_key, float(best_km), best_fonte
+
+# =========================================================
 # ENDPOINTS
-# ==========================
+# =========================================================
 @app.route("/health")
 def health():
     return {
         "ok": True,
         "valores": DATA["consts"],
         "itens_catalogo": len(DATA["catalogo"]),
-        "faixas_cep_km": len(DATA["faixas"])
+        "faixas_gerais": len(DATA["faixas_gerais"]),
+        "faixas_by_origem": {k: len(v) for k, v in DATA["faixas_by_origem"].items()},
+        "origens": ORIGENS,
     }
 
 @app.route("/km")
 def km_endpoint():
     cep_dest = request.args.get("cep_destino","")
-    km, fonte = km_por_cep(DATA.get("faixas", []), cep_dest)
-    return {"cep_destino": so_digitos(cep_dest), "km": km, "fonte": fonte, "faixas_carregadas": len(DATA.get("faixas", []))}
+    origem_param = (request.args.get("origem") or "").lower().strip()
+    if origem_param and origem_param in ORIGENS:
+        faixas = DATA["faixas_by_origem"].get(origem_param, [])
+        km, fonte = km_por_cep(faixas, cep_dest)
+        origem_escolhida = origem_param
+    else:
+        origem_escolhida, km, fonte = melhor_origem_para(cep_dest)
+
+    return {
+        "cep_destino": so_digitos(cep_dest),
+        "origem": origem_escolhida,
+        "km": km,
+        "fonte": fonte,
+        "faixas_origem": len(DATA["faixas_by_origem"].get(origem_escolhida, []))
+    }
 
 @app.route("/debug_faixas")
 def debug_faixas():
-    fxs = DATA.get("faixas", [])[:30]
-    return {"amostra": [{"ini": a, "fim": b, "km": k} for a,b,k in fxs], "total_faixas": len(DATA.get("faixas", []))}
+    origem = (request.args.get("origem") or "fw").lower()
+    faixas = DATA["faixas_by_origem"].get(origem, DATA["faixas_gerais"])
+    fxs = faixas[:30]
+    return {"origem": origem, "amostra": [{"ini": a, "fim": b, "km": k} for a,b,k in fxs], "total_faixas": len(faixas)}
 
 @app.route("/frete")
 def frete():
-    # token
     token = request.args.get("token","")
     if token != TOKEN_SECRETO:
         return Response("Token inválido", status=403)
 
-    cep_origem = request.args.get("cep","")
     cep_dest = request.args.get("cep_destino","")
     prods = request.args.get("prods","")
-    km_param = request.args.get("km","")  # opcional (teste)
+    km_param = request.args.get("km","")          # override opcional
+    origem_param = (request.args.get("origem") or "").lower().strip()
 
     if not cep_dest or not prods:
         return Response("Parâmetros insuficientes", status=400)
@@ -408,7 +470,6 @@ def frete():
     if not itens:
         return Response("Nenhum item válido em 'prods'", status=400)
 
-    # constantes saneadas
     valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
     tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
     if not isinstance(valor_km,(int,float)) or not math.isfinite(valor_km) or valor_km<=0:
@@ -416,18 +477,16 @@ def frete():
     if not isinstance(tam_caminhao,(int,float)) or not math.isfinite(tam_caminhao) or tam_caminhao<=0:
         tam_caminhao = DEFAULT_TAM_CAMINHAO
 
-    # permite override via query (teste rápido)
-    try:
-        if request.args.get("valor_km"):
-            valor_km = float(str(request.args["valor_km"]).replace(",", "."))
-        if request.args.get("tam_caminhao"):
-            tam_caminhao = float(str(request.args["tam_caminhao"]).replace(",", "."))
-    except Exception:
-        pass
+    # 1) decidir origem (manual ou automática)
+    if origem_param and origem_param in ORIGENS:
+        origem_escolhida = origem_param
+        faixas = DATA["faixas_by_origem"].get(origem_escolhida, DATA["faixas_gerais"])
+        km_calc, km_fonte = km_por_cep(faixas, cep_dest)
+    else:
+        origem_escolhida, km_calc, km_fonte = melhor_origem_para(cep_dest)
 
-    # KM: prioridade p/ parâmetro (teste); senão, CEP->faixa/UF/default
+    # 2) override por parâmetro opcional
     km = None
-    km_fonte = "default"
     if km_param:
         try:
             km = max(1.0, float(str(km_param).replace(",", ".")))
@@ -435,16 +494,14 @@ def frete():
         except Exception:
             km = None
     if km is None:
-        km, km_fonte = km_por_cep(DATA.get("faixas", []), cep_dest)
+        km = km_calc
 
-    # soma dos itens (pelo maior lado de controle da peça)
     total = 0.0
     itens_xml = []
     for it in itens:
         nome = it["codigo"] or "Item"
         tam_catalogo = DATA["catalogo"].get(nome)
         if tam_catalogo is None:
-            # se não está no catálogo, assume maior entre altura e largura informadas
             tam_catalogo = tamanho_peca_por_nome(nome, it["alt"], it["larg"])
         valor_item = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao) * max(1, it["qty"])
         total += valor_item
@@ -456,9 +513,11 @@ def frete():
         <valor>{valor_item:.2f}</valor>
       </item>""")
 
-    debug_info = f"<debug km='{km}' fonte_km='{km_fonte}' valor_km='{valor_km}' tam_caminhao='{tam_caminhao}'/>"
+    debug_info = (
+        f"<debug km='{km}' fonte_km='{km_fonte}' valor_km='{valor_km}' "
+        f"tam_caminhao='{tam_caminhao}' origem='{origem_escolhida}:{ORIGENS[origem_escolhida]['nome']}'/>"
+    )
 
-    # ====== ÚNICO SERVIÇO ======
     xml = f"""<?xml version="1.0"?>
 <cotacao>
   <resultado>
