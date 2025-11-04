@@ -117,33 +117,81 @@ def detectar_colunas(df: pd.DataFrame) -> Tuple[int,int,int]:
     return idx_ini, idx_fim, idx_km
 
 def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
+    import numpy as np
     faixas: List[Tuple[str,str,float]] = []
+
+    def pega_primeiro_numero_km(linha_vals):
+        # pega o primeiro valor numérico plausível p/ KM na linha
+        for v in linha_vals:
+            try:
+                s = str(v).strip().lower().replace(",", ".")
+                if s in ("", "nan", "none", "null"):
+                    continue
+                f = float(s)
+                if math.isfinite(f) and f > 0:
+                    return f
+            except Exception:
+                continue
+        return None
+
+    def extrai_ceps_de_texto(s: str) -> Tuple[str, str] | None:
+        if not isinstance(s, str):
+            return None
+        # pega todos conjuntos de 8 dígitos (com ou sem hífen no meio)
+        dig = re.findall(r"(\d{5}-?\d{3})", s)
+        if len(dig) >= 2:
+            a = so_digitos(dig[0])
+            b = so_digitos(dig[1])
+            if len(a) == 8 and len(b) == 8:
+                return a, b
+        return None
+
     for sheet in xls.sheet_names:
         try:
             df = pd.read_excel(xls, sheet)
         except Exception:
             continue
-        if df.empty: continue
-        ini,fim,km = detectar_colunas(df)
-        if None in (ini,fim,km): 
-            # tentativa alternativa: se tiver pelo menos 3 colunas, tenta as 3 primeiras
-            if df.shape[1] >= 3: ini,fim,km = 0,1,2
-            else: continue
-        sub = df.iloc[:, [ini,fim,km]].dropna(how="all")
-        for _, row in sub.iterrows():
-            cepi = so_digitos(row.iloc[0])
-            cepf = so_digitos(row.iloc[1])
-            try:
-                k = float(str(row.iloc[2]).replace(",","."))
-            except Exception:
+        if df.empty:
+            continue
+
+        # 1) Tenta detectar colunas clássicas (ini/fim/km)
+        ini, fim, km = detectar_colunas(df)
+        if None not in (ini, fim, km):
+            sub = df.iloc[:, [ini, fim, km]].dropna(how="all")
+            for _, row in sub.iterrows():
+                a = so_digitos(row.iloc[0])
+                b = so_digitos(row.iloc[1])
+                try:
+                    k = float(str(row.iloc[2]).replace(",", "."))
+                except Exception:
+                    continue
+                if len(a) == 8 and len(b) == 8 and math.isfinite(k) and k > 0:
+                    faixas.append((a, b, k))
+            continue  # já achou neste sheet
+
+        # 2) Fallback: procurar LINHA com "faixa única" (texto com 2 CEPs) + uma coluna numérica para KM
+        for _, row in df.iterrows():
+            valores = list(row.values)
+            # tenta achar um campo de texto com 2 CEPs
+            a_b = None
+            for v in valores:
+                ab = extrai_ceps_de_texto(v)
+                if ab:
+                    a_b = ab
+                    break
+            if not a_b:
                 continue
-            if len(cepi)==8 and len(cepf)==8 and math.isfinite(k) and k>0:
-                faixas.append((cepi,cepf,k))
-    # remove duplicados e ordena
+            km_val = pega_primeiro_numero_km(valores)
+            if not km_val:
+                continue
+            a, b = a_b
+            faixas.append((a, b, float(km_val)))
+
+    # Dedup e ordena
     uniq = {}
-    for a,b,k in faixas:
-        uniq[(a,b)] = k
-    out = [(a,b,k) for (a,b),k in uniq.items()]
+    for a, b, k in faixas:
+        uniq[(a, b)] = k
+    out = [(a, b, k) for (a, b), k in uniq.items()]
     out.sort(key=lambda x: (x[0], x[1]))
     return out
 
@@ -318,3 +366,4 @@ def frete():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")), debug=True)
+
