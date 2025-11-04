@@ -116,17 +116,19 @@ def detectar_colunas(df: pd.DataFrame) -> Tuple[int,int,int]:
         if idx_km  is None and match(str(c), COL_KM):     idx_km  = i
     return idx_ini, idx_fim, idx_km
 
+# --- SUBSTITUA estas duas funções pelo código abaixo ---
 def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
     import numpy as np
     faixas: List[Tuple[str,str,float]] = []
 
-    def pega_primeiro_numero_km(linha_vals):
-        # pega o primeiro valor numérico plausível p/ KM na linha
-        for v in linha_vals:
+    def primeiro_km_valido(vals):
+        for v in vals:
+            if v is None: 
+                continue
+            s = str(v).strip().lower().replace(",", ".")
+            if s in ("", "nan", "none", "null"): 
+                continue
             try:
-                s = str(v).strip().lower().replace(",", ".")
-                if s in ("", "nan", "none", "null"):
-                    continue
                 f = float(s)
                 if math.isfinite(f) and f > 0:
                     return f
@@ -134,74 +136,82 @@ def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
                 continue
         return None
 
-    def extrai_ceps_de_texto(s: str) -> Tuple[str, str] | None:
+    def extrai_ceps_de_texto(s: Any) -> Tuple[str, str] | None:
         if not isinstance(s, str):
             return None
-        # pega todos conjuntos de 8 dígitos (com ou sem hífen no meio)
-        dig = re.findall(r"(\d{5}-?\d{3})", s)
-        if len(dig) >= 2:
-            a = so_digitos(dig[0])
-            b = so_digitos(dig[1])
+        # tenta 2 CEPs no mesmo campo (com ou sem hífen, separados por →, -, a, etc.)
+        pat = r"(\d{5}-?\d{3}).*?(\d{5}-?\d{3})"
+        m = re.search(pat, s)
+        if m:
+            a = so_digitos(m.group(1))
+            b = so_digitos(m.group(2))
             if len(a) == 8 and len(b) == 8:
                 return a, b
         return None
 
     for sheet in xls.sheet_names:
         try:
-            df = pd.read_excel(xls, sheet)
+            # força leitura como texto para não perder CEPs com zeros à esquerda
+            df = pd.read_excel(xls, sheet, dtype=str)
         except Exception:
             continue
         if df.empty:
             continue
 
-        # 1) Tenta detectar colunas clássicas (ini/fim/km)
+        # tenta detectar colunas "clássicas"
         ini, fim, km = detectar_colunas(df)
         if None not in (ini, fim, km):
-            sub = df.iloc[:, [ini, fim, km]].dropna(how="all")
+            sub = df.iloc[:, [ini, fim, km]]
             for _, row in sub.iterrows():
                 a = so_digitos(row.iloc[0])
                 b = so_digitos(row.iloc[1])
-                try:
-                    k = float(str(row.iloc[2]).replace(",", "."))
-                except Exception:
-                    continue
-                if len(a) == 8 and len(b) == 8 and math.isfinite(k) and k > 0:
-                    faixas.append((a, b, k))
-            continue  # já achou neste sheet
+                kv = primeiro_km_valido([row.iloc[2]])
+                if len(a)==8 and len(b)==8 and kv:
+                    faixas.append((a, b, float(kv)))
+            continue
 
-        # 2) Fallback: procurar LINHA com "faixa única" (texto com 2 CEPs) + uma coluna numérica para KM
+        # fallback: linha com 2 CEPs em um único campo + algum número na mesma linha como KM
         for _, row in df.iterrows():
-            valores = list(row.values)
-            # tenta achar um campo de texto com 2 CEPs
-            a_b = None
-            for v in valores:
+            vals = list(row.values)
+            ab = None
+            for v in vals:
                 ab = extrai_ceps_de_texto(v)
                 if ab:
-                    a_b = ab
                     break
-            if not a_b:
+            if not ab:
                 continue
-            km_val = pega_primeiro_numero_km(valores)
-            if not km_val:
+            kmv = primeiro_km_valido(vals)
+            if not kmv:
                 continue
-            a, b = a_b
-            faixas.append((a, b, float(km_val)))
+            a, b = ab
+            faixas.append((a, b, float(kmv)))
 
-    # Dedup e ordena
+    # dedup + ordena
     uniq = {}
     for a, b, k in faixas:
-        uniq[(a, b)] = k
+        if len(a)==8 and len(b)==8 and math.isfinite(k) and k>0:
+            uniq[(a, b)] = k
     out = [(a, b, k) for (a, b), k in uniq.items()]
     out.sort(key=lambda x: (x[0], x[1]))
     return out
 
 def km_por_cep(faixas: List[Tuple[str,str,float]], cep_dest: str) -> float:
     d = so_digitos(cep_dest)
-    if len(d)!=8: return DEFAULT_KM
+    if len(d) != 8 or not faixas:
+        return DEFAULT_KM
     n = int(d)
-    for a,b,k in faixas:
+    # busca binária simples por faixa (como estão ordenadas)
+    lo, hi = 0, len(faixas)-1
+    while lo <= hi:
+        mid = (lo+hi)//2
+        a, b, k = faixas[mid]
         na, nb = int(a), int(b)
-        if na <= n <= nb: return float(k)
+        if n < na:
+            hi = mid - 1
+        elif n > nb:
+            lo = mid + 1
+        else:
+            return float(k)
     return DEFAULT_KM
 
 # ==========================
@@ -363,6 +373,17 @@ def frete():
   </resultado>
 </cotacao>"""
     return Response(xml, mimetype="application/xml")
+@app.route("/km")
+def km_endpoint():
+    cep_dest = request.args.get("cep_destino","")
+    km = km_por_cep(DATA.get("faixas", []), cep_dest)
+    return {"cep_destino": so_digitos(cep_dest), "km": km, "faixas_carregadas": len(DATA.get("faixas", []))}
+
+@app.route("/debug_faixas")
+def debug_faixas():
+    fxs = DATA.get("faixas", [])[:20]
+    return {"amostra": [{"ini": a, "fim": b, "km": k} for a,b,k in fxs], "total_faixas": len(DATA.get("faixas", []))}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")), debug=True)
