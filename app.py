@@ -2,12 +2,27 @@
 import os
 import math
 import re
-import requests
 import time
-from typing import Dict, Any, List, Tuple, Optional
-import pandas as pd
-from flask import Flask, request, Response
 import unicodedata
+from typing import Dict, Any, List, Tuple, Optional
+
+try:
+    import requests
+except ImportError:
+    print("ERRO: requests não instalado. Execute: pip install requests")
+    requests = None
+
+try:
+    import pandas as pd
+except ImportError:
+    print("ERRO: pandas não instalado. Execute: pip install pandas openpyxl")
+    pd = None
+
+try:
+    from flask import Flask, request, Response
+except ImportError:
+    print("ERRO: flask não instalado. Execute: pip install flask")
+    Flask = None
 
 # ==========================
 # CONFIGURAÇÕES
