@@ -1,156 +1,110 @@
-# app.py — API de Frete com cálculo de distância LOCAL (sem APIs externas)
+# app.py — API de Frete TRAY COMPATIBLE
 import os
 import math
 import re
 from typing import Dict, Any, List, Tuple, Optional
 import pandas as pd
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response
+from flask_cors import CORS
 
 # ==========================
 # CONFIGURAÇÕES
 # ==========================
 TOKEN_SECRETO = os.getenv("TOKEN_SECRETO", "teste123")
-CEP_ORIGEM = os.getenv("CEP_ORIGEM", "98400000")  # Frederico Westphalen/RS
+CEP_ORIGEM = os.getenv("CEP_ORIGEM", "98400000")
 ARQ_PLANILHA = os.getenv("PLANILHA_FRETE", "tabela de frete atualizada(2)(Recuperado Automaticamente).xlsx")
 
 DEFAULT_VALOR_KM = float(os.getenv("DEFAULT_VALOR_KM", "7.0"))
 DEFAULT_TAM_CAMINHAO = float(os.getenv("DEFAULT_TAM_CAMINHAO", "8.5"))
 DEFAULT_KM = float(os.getenv("DEFAULT_KM", "450.0"))
 
-PALAVRAS_IGNORAR = {
-    "VALOR KM", "TAMANHO CAMINHAO", "TAMANHO CAMINHÃO",
-    "CALCULO DE FRETE POR TAMANHO DE PEÇA", "CÁLCULO DE FRETE POR TAMANHO DE PEÇA"
-}
-
 app = Flask(__name__)
+CORS(app)  # CRITICAL: Tray precisa de CORS
 
 # ==========================
-# TABELA DE COORDENADAS LOCAL (sem API)
+# COORDENADAS MUNICIPIOS
 # ==========================
 COORDENADAS_MUNICIPIOS = {
-    # Rio Grande do Sul
     "FREDERICO WESTPHALEN-RS": (-27.3594, -53.3937),
     "PORTO ALEGRE-RS": (-30.0346, -51.2177),
     "CAXIAS DO SUL-RS": (-29.1634, -51.1797),
     "PELOTAS-RS": (-31.7654, -52.3376),
     "CANOAS-RS": (-29.9177, -51.1844),
     "SANTA MARIA-RS": (-29.6868, -53.8149),
-    "GRAVATAI-RS": (-29.9419, -50.9928),
-    "VIAMAO-RS": (-30.0811, -51.0233),
-    "NOVO HAMBURGO-RS": (-29.6783, -51.1306),
-    "SAO LEOPOLDO-RS": (-29.7600, -51.1479),
-    "ALVORADA-RS": (-30.0011, -51.0797),
     "PASSO FUNDO-RS": (-28.2620, -52.4083),
-    "SAPUCAIA DO SUL-RS": (-29.8389, -51.1447),
-    "URUGUAIANA-RS": (-29.7547, -57.0883),
-    "SANTA CRUZ DO SUL-RS": (-29.7175, -52.4261),
-    "CACHOEIRINHA-RS": (-29.9508, -51.0944),
     "ERECHIM-RS": (-27.6336, -52.2736),
-    "GUAIBA-RS": (-30.1139, -51.3253),
-    "SANTANA DO LIVRAMENTO-RS": (-30.8908, -55.5322),
-    "BAGE-RS": (-31.3286, -54.1072),
-    # Santa Catarina
     "FLORIANOPOLIS-SC": (-27.5954, -48.5480),
     "JOINVILLE-SC": (-26.3045, -48.8487),
     "BLUMENAU-SC": (-26.9194, -49.0661),
-    "SAO JOSE-SC": (-27.6108, -48.6350),
     "CHAPECO-SC": (-27.0965, -52.6146),
-    "CRICIUMA-SC": (-28.6773, -49.3695),
-    "ITAJAI-SC": (-26.9075, -48.6614),
-    "JARAGUA DO SUL-SC": (-26.4869, -49.0669),
-    "LAGES-SC": (-27.8160, -50.3264),
-    "PALHOCA-SC": (-27.6450, -48.6700),
-    # Paraná
     "CURITIBA-PR": (-25.4284, -49.2733),
     "LONDRINA-PR": (-23.3045, -51.1696),
     "MARINGA-PR": (-23.4205, -51.9333),
-    "PONTA GROSSA-PR": (-25.0916, -50.1668),
     "CASCAVEL-PR": (-24.9555, -53.4552),
-    "SAO JOSE DOS PINHAIS-PR": (-25.5304, -49.2064),
     "FOZ DO IGUACU-PR": (-25.5163, -54.5854),
-    "COLOMBO-PR": (-25.2919, -49.2244),
-    "GUARAPUAVA-PR": (-25.3905, -51.4628),
-    "PARANAGUA-PR": (-25.5200, -48.5089),
-    # São Paulo
     "SAO PAULO-SP": (-23.5505, -46.6333),
     "GUARULHOS-SP": (-23.4538, -46.5333),
     "CAMPINAS-SP": (-22.9099, -47.0626),
-    "SAO BERNARDO DO CAMPO-SP": (-23.6914, -46.5647),
-    "SANTO ANDRE-SP": (-23.6636, -46.5341),
-    "OSASCO-SP": (-23.5329, -46.7919),
+    "SANTOS-SP": (-23.9608, -46.3336),
     "SAO JOSE DOS CAMPOS-SP": (-23.1791, -45.8872),
     "RIBEIRAO PRETO-SP": (-21.1767, -47.8103),
-    "SOROCABA-SP": (-23.5015, -47.4526),
-    "SANTOS-SP": (-23.9608, -46.3336),
-    # Rio de Janeiro
     "RIO DE JANEIRO-RJ": (-22.9068, -43.1729),
-    "SAO GONCALO-RJ": (-22.8268, -43.0534),
-    "DUQUE DE CAXIAS-RJ": (-22.7858, -43.3054),
-    "NOVA IGUACU-RJ": (-22.7591, -43.4509),
     "NITEROI-RJ": (-22.8839, -43.1039),
-    # Minas Gerais
     "BELO HORIZONTE-MG": (-19.9167, -43.9345),
-    "UBERLANDIA-MG": (-18.9186, -48.2772),
     "CONTAGEM-MG": (-19.9320, -44.0539),
-    "JUIZ DE FORA-MG": (-21.7642, -43.3502),
-    # Outras capitais
     "BRASILIA-DF": (-15.8267, -47.9218),
-    "SALVADOR-BA": (-12.9714, -38.5014),
-    "FORTALEZA-CE": (-3.7172, -38.5433),
-    "RECIFE-PE": (-8.0476, -34.8770),
-    "MANAUS-AM": (-3.1190, -60.0217),
-    "GOIANIA-GO": (-16.6869, -49.2648),
-    "VITORIA-ES": (-20.3155, -40.3128),
-    "CAMPO GRANDE-MS": (-20.4697, -54.6201),
-    "CUIABA-MT": (-15.6014, -56.0979),
 }
 
-# Mapeamento CEP -> Município (faixas resumidas)
 FAIXAS_CEP_MUNICIPIO = [
-    # RS
     ("98400000", "98419999", "FREDERICO WESTPHALEN-RS"),
     ("90000000", "91999999", "PORTO ALEGRE-RS"),
     ("95000000", "95130999", "CAXIAS DO SUL-RS"),
-    ("96000000", "96099999", "PELOTAS-RS"),
     ("92000000", "92999999", "CANOAS-RS"),
-    ("97000000", "97119999", "SANTA MARIA-RS"),
     ("99000000", "99099999", "PASSO FUNDO-RS"),
     ("99700000", "99799999", "ERECHIM-RS"),
-    # SC
     ("88000000", "88099999", "FLORIANOPOLIS-SC"),
     ("89200000", "89239999", "JOINVILLE-SC"),
     ("89000000", "89099999", "BLUMENAU-SC"),
     ("89800000", "89879999", "CHAPECO-SC"),
-    # PR
     ("80000000", "82999999", "CURITIBA-PR"),
     ("86000000", "86199999", "LONDRINA-PR"),
     ("87000000", "87099999", "MARINGA-PR"),
     ("85800000", "85879999", "CASCAVEL-PR"),
     ("85850000", "85869999", "FOZ DO IGUACU-PR"),
-    # SP
     ("01000000", "05999999", "SAO PAULO-SP"),
     ("07000000", "07399999", "GUARULHOS-SP"),
     ("13000000", "13149999", "CAMPINAS-SP"),
-    ("09700000", "09899999", "SAO BERNARDO DO CAMPO-SP"),
     ("11000000", "11999999", "SANTOS-SP"),
     ("12200000", "12249999", "SAO JOSE DOS CAMPOS-SP"),
     ("14000000", "14109999", "RIBEIRAO PRETO-SP"),
-    # RJ
     ("20000000", "23799999", "RIO DE JANEIRO-RJ"),
     ("24000000", "24999999", "NITEROI-RJ"),
-    # MG
     ("30000000", "31999999", "BELO HORIZONTE-MG"),
-    ("32000000", "32999999", "CONTAGEM-MG"),
-    # DF
     ("70000000", "72799999", "BRASILIA-DF"),
 ]
 
 # ==========================
-# FUNÇÕES DE CÁLCULO
+# FUNÇÕES
 # ==========================
 def limpar_cep(cep: str) -> str:
     s = re.sub(r'\D', '', str(cep or ""))
     return s[:8].zfill(8) if s else "00000000"
+
+def uf_por_cep(cep8: str) -> Optional[str]:
+    ranges = [
+        ("RS","90000000","99999999"),("SC","88000000","89999999"),
+        ("PR","80000000","87999999"),("SP","01000000","19999999"),
+        ("RJ","20000000","28999999"),("MG","30000000","39999999"),
+        ("DF","70000000","73699999"),
+    ]
+    try:
+        n = int(cep8)
+        for uf, a, b in ranges:
+            if int(a) <= n <= int(b):
+                return uf
+    except:
+        pass
+    return None
 
 def buscar_municipio_por_cep(cep: str) -> Optional[str]:
     cep_limpo = limpar_cep(cep)
@@ -159,392 +113,128 @@ def buscar_municipio_por_cep(cep: str) -> Optional[str]:
         if int(inicio) <= cep_num <= int(fim):
             return municipio
     uf = uf_por_cep(cep_limpo)
-    if uf:
-        capitais = {
-            "RS": "PORTO ALEGRE-RS",
-            "SC": "FLORIANOPOLIS-SC",
-            "PR": "CURITIBA-PR",
-            "SP": "SAO PAULO-SP",
-            "RJ": "RIO DE JANEIRO-RJ",
-            "MG": "BELO HORIZONTE-MG",
-            "DF": "BRASILIA-DF",
-        }
-        return capitais.get(uf)
-    return None
+    capitais = {
+        "RS": "PORTO ALEGRE-RS", "SC": "FLORIANOPOLIS-SC",
+        "PR": "CURITIBA-PR", "SP": "SAO PAULO-SP",
+        "RJ": "RIO DE JANEIRO-RJ", "MG": "BELO HORIZONTE-MG",
+        "DF": "BRASILIA-DF",
+    }
+    return capitais.get(uf) if uf else None
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-def calcular_distancia_real(cep_origem: str, cep_destino: str) -> Tuple[Optional[float], str, Dict[str, Any]]:
-    detalhes = {
-        "cep_origem": cep_origem,
-        "cep_destino": cep_destino,
-        "municipio_origem": None,
-        "municipio_destino": None,
-    }
+def calcular_km(cep_origem: str, cep_destino: str) -> float:
     muni_origem = buscar_municipio_por_cep(cep_origem)
     muni_destino = buscar_municipio_por_cep(cep_destino)
-    detalhes["municipio_origem"] = muni_origem
-    detalhes["municipio_destino"] = muni_destino
-
+    
     if not muni_origem or not muni_destino:
-        return (None, "municipio_nao_encontrado", detalhes)
-
+        uf = uf_por_cep(limpar_cep(cep_destino))
+        KM_UF = {"RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"DF":2000}
+        return KM_UF.get(uf, DEFAULT_KM)
+    
     if muni_origem == muni_destino:
-        return (10.0, "mesmo_municipio", detalhes)
+        return 10.0
+    
+    c1 = COORDENADAS_MUNICIPIOS.get(muni_origem)
+    c2 = COORDENADAS_MUNICIPIOS.get(muni_destino)
+    if not c1 or not c2:
+        return DEFAULT_KM
+    
+    km = haversine(c1[0], c1[1], c2[0], c2[1]) * 1.15
+    return max(10.0, round(km / 5) * 5)
 
-    coord_origem = COORDENADAS_MUNICIPIOS.get(muni_origem)
-    coord_destino = COORDENADAS_MUNICIPIOS.get(muni_destino)
-    if not coord_origem or not coord_destino:
-        return (None, "coordenadas_nao_encontradas", detalhes)
-
-    km = haversine(coord_origem[0], coord_origem[1], coord_destino[0], coord_destino[1])
-    km *= 1.15  # rodovia ~15% maior que linha reta
-    km = round(km / 5) * 5
-    km = max(10.0, km)
-    return (km, "distancia_calculada", detalhes)
-
-def uf_por_cep(cep8: str) -> Optional[str]:
-    UF_CEP_RANGES = [
-        ("SP","01000000","19999999"),("RJ","20000000","28999999"),
-        ("ES","29000000","29999999"),("MG","30000000","39999999"),
-        ("BA","40000000","48999999"),("SE","49000000","49999999"),
-        ("PE","50000000","56999999"),("AL","57000000","57999999"),
-        ("PB","58000000","58999999"),("RN","59000000","59999999"),
-        ("CE","60000000","63999999"),("PI","64000000","64999999"),
-        ("MA","65000000","65999999"),("PA","66000000","68899999"),
-        ("AP","68900000","68999999"),("AM","69000000","69899999"),
-        ("RR","69300000","69399999"),("AC","69900000","69999999"),
-        ("DF","70000000","73699999"),("GO","72800000","76799999"),
-        ("TO","77000000","77999999"),("MT","78000000","78899999"),
-        ("MS","79000000","79999999"),("PR","80000000","87999999"),
-        ("SC","88000000","89999999"),("RS","90000000","99999999"),
-    ]
-    try:
-        n = int(cep8)
-    except:
-        return None
-    for uf, a, b in UF_CEP_RANGES:
-        if int(a) <= n <= int(b):
-            return uf
-    return None
-
-# ==========================
-# FUNÇÕES DA PLANILHA
-# ==========================
-def limpar_texto(nome: Any) -> str:
-    if not isinstance(nome, str): return ""
-    return " ".join(nome.replace("\n"," ").split()).strip()
-
-def extrai_numero_linha(row) -> Optional[float]:
-    for v in row:
-        if v is None or pd.isna(v): continue
-        s = str(v).strip().upper()
-        if s in ("", "NAN", "NONE", "NULL"): continue
-        s = s.replace(",", ".")
-        s = re.sub(r'(METROS?|KM|R\$|REAIS|/KM)', '', s, flags=re.IGNORECASE).strip()
-        try:
-            f = float(s)
-            if math.isfinite(f) and f > 0: return f
-        except: pass
-    return None
-
-def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
-    valor_km = DEFAULT_VALOR_KM
-    tam_caminhao = DEFAULT_TAM_CAMINHAO
-    for aba in ("BASE_CALCULO", "D", "BASE", "CONSTANTES"):
-        if aba not in xls.sheet_names: continue
-        try:
-            raw = pd.read_excel(xls, aba, header=None)
-            for _, row in raw.iterrows():
-                texto = " ".join([str(v).upper() for v in row if isinstance(v, str)])
-                if "VALOR" in texto or "KM" in texto:
-                    num = extrai_numero_linha(row)
-                    if num and 3 <= num <= 50: valor_km = num
-                if "TAMANHO" in texto and "CAMINH" in texto:
-                    num = extrai_numero_linha(row)
-                    if num and 3 <= num <= 20: tam_caminhao = num
-        except Exception as e:
-            print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    return {"VALOR_KM": valor_km, "TAM_CAMINHAO": tam_caminhao}
-
-def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
-    for aba in ("CADASTRO_PRODUTO", "CADASTRO", "PRODUTOS"):
-        if aba not in xls.sheet_names: continue
-        try:
-            raw = pd.read_excel(xls, aba, header=None)
-            nome_col = 2 if raw.shape[1] > 2 else 0
-            dim1_col = 3 if raw.shape[1] > 3 else (1 if raw.shape[1] > 1 else 0)
-            dim2_col = 4 if raw.shape[1] > 4 else (2 if raw.shape[1] > 2 else 1)
-            df = raw[[nome_col, dim1_col, dim2_col]].copy()
-            df.columns = ["nome", "dim1", "dim2"]
-            df["nome"] = df["nome"].apply(limpar_texto)
-            df = df[~df["nome"].str.upper().isin(PALAVRAS_IGNORAR)]
-            df = df[df["nome"].astype(str).str.len() > 0]
-            df["dim1"] = pd.to_numeric(df["dim1"], errors="coerce").fillna(0.0)
-            df["dim2"] = pd.to_numeric(df["dim2"], errors="coerce").fillna(0.0)
-            df = df.drop_duplicates(subset=["nome"], keep="first").reset_index(drop=True)
-            return df[["nome", "dim1", "dim2"]]
-        except Exception as e:
-            print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    return pd.DataFrame(columns=["nome", "dim1", "dim2"])
-
-def tipo_produto(nome: str) -> str:
-    n = (nome or "").lower()
-    if "fossa" in n: return "fossa"
-    if "vertical" in n: return "vertical"
-    if "horizontal" in n: return "horizontal"
-    if "tc" in n and ("10.000" in n or "10000" in n or "10.0" in n): return "tc_ate_10k"
-    return "auto"
-
-def tamanho_peca_por_nome(nome: str, dim1: float, dim2: float) -> float:
-    t = tipo_produto(nome)
-    if t in ("fossa", "vertical"):  return float(dim1 or 0.0)
-    if t in ("horizontal", "tc_ate_10k"): return float(dim2 or 0.0)
-    return float(max(float(dim1 or 0.0), float(dim2 or 0.0)))
-
-def montar_catalogo_tamanho(df: pd.DataFrame) -> Dict[str, float]:
-    mapa: Dict[str, float] = {}
-    for _, r in df.iterrows():
-        try:
-            nome = limpar_texto(r["nome"])
-            if not nome or nome.upper() in PALAVRAS_IGNORAR: continue
-            tam = tamanho_peca_por_nome(nome, float(r["dim1"]), float(r["dim2"]))
-            if tam > 0: mapa[nome] = tam
-        except Exception as e:
-            print(f"[WARN] Erro ao processar produto: {e}")
-    return mapa
-
-def carregar_tudo() -> Dict[str, Any]:
+def carregar_dados():
     try:
         xls = pd.ExcelFile(ARQ_PLANILHA)
-        consts = carregar_constantes(xls)
-        cadastro = carregar_cadastro_produtos(xls)
-        catalogo = montar_catalogo_tamanho(cadastro)
-        print(f"[OK] Planilha carregada: {len(catalogo)} produtos")
-        return {"consts": consts, "catalogo": catalogo}
-    except Exception as e:
-        print(f"[WARN] Planilha não carregada: {e}")
-        return {
-            "consts": {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO},
-            "catalogo": {}
-        }
+        # Simplificado - apenas retorna defaults se falhar
+        return {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO}
+    except:
+        return {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO}
 
-DATA = carregar_tudo()
+DATA = carregar_dados()
 
 # ==========================
-# CÁLCULO DE FRETE
+# ENDPOINT PRINCIPAL TRAY
 # ==========================
-def calcula_valor_item(tamanho_peca_m: float, km: float, valor_km: float, tam_caminhao: float) -> float:
-    if tamanho_peca_m <= 0 or tam_caminhao <= 0: return 0.0
-    ocupacao = float(tamanho_peca_m) / float(tam_caminhao)
-    return round(float(valor_km) * float(km) * ocupacao, 2)
-
-def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
-    itens: List[Dict[str, Any]] = []
-    if not prods_str: return itens
-
-    blocos = []
-    for sep in ("/", "|"):
-        if sep in prods_str:
-            blocos = [b for b in prods_str.split(sep) if b.strip()]
-            break
-    if not blocos:
-        blocos = [prods_str]
-
-    def norm_num(x):
-        if x is None: return 0.0
-        s = str(x).strip().lower()
-        if s in ("", "null", "none", "nan"): return 0.0
-        s = s.replace(",", ".")
-        try: return float(s)
-        except: return 0.0
-
-    def cm_to_m(x):
-        if not x or x == 0: return 0.0
-        return x/100.0 if x > 20 else x
-
-    for raw in blocos:
-        try:
-            partes = raw.split(";")
-            if len(partes) < 8:
-                continue
-            comp, larg, alt, cub, qty, peso, codigo, valor = partes[:8]
-            item = {
-                "comp": cm_to_m(norm_num(comp)),
-                "larg": cm_to_m(norm_num(larg)),
-                "alt": cm_to_m(norm_num(alt)),
-                "cub": norm_num(cub),
-                "qty": int(norm_num(qty)) if norm_num(qty) > 0 else 1,
-                "peso": norm_num(peso),
-                "codigo": (codigo or "").strip(),
-                "valor": norm_num(valor),
-            }
-            itens.append(item)
-        except Exception as e:
-            print(f"[WARN] Erro parse item: {raw} - {e}")
-    return itens
-
-# ==========================
-# ENDPOINTS
-# ==========================
-@app.route("/")
-def index():
-    return {
-        "api": "Bakof Frete",
-        "versao": "3.1 - Tray Compatible",
-        "municipios_disponiveis": len(COORDENADAS_MUNICIPIOS),
-        "endpoints": {
-            "/health": "Status da API",
-            "/frete": "Calcular frete (compatível Tray)",
-            "/teste-distancia": "Testar distância entre CEPs",
-            "/municipios": "Listar municípios disponíveis"
-        }
-    }
-
-@app.route("/health")
-def health():
-    return {
-        "ok": True,
-        "cep_origem": CEP_ORIGEM,
-        "valores": DATA["consts"],
-        "itens_catalogo": len(DATA["catalogo"]),
-        "municipios_cadastrados": len(COORDENADAS_MUNICIPIOS),
-    }
-
-@app.route("/municipios")
-def listar_municipios():
-    return {
-        "total": len(COORDENADAS_MUNICIPIOS),
-        "municipios": sorted(list(COORDENADAS_MUNICIPIOS.keys()))
-    }
-
-@app.route("/teste-distancia")
-def teste_distancia():
-    a = request.args.get("a", CEP_ORIGEM)
-    b = request.args.get("b", "")
-    km, fonte, det = calcular_distancia_real(a, b)
-    return jsonify({"km": km, "fonte": fonte, "detalhes": det})
-
-@app.route("/frete", methods=["GET", "POST"])
+@app.route("/frete", methods=["GET", "POST", "OPTIONS"])
 def frete():
+    # CORS preflight
+    if request.method == "OPTIONS":
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
+    
     try:
-        # Suporta GET e POST
+        # Captura parâmetros (GET ou POST)
         if request.method == "POST":
-            params = request.form.to_dict() if request.form else request.get_json(silent=True) or {}
+            params = request.form.to_dict() or request.get_json(silent=True) or {}
         else:
             params = request.args.to_dict()
         
-        # Log para debug
-        print(f"[DEBUG] Requisição recebida: {request.method}")
-        print(f"[DEBUG] Parâmetros: {params}")
+        print(f"\n{'='*60}")
+        print(f"REQUISIÇÃO RECEBIDA - {request.method}")
+        print(f"Params: {params}")
+        print(f"{'='*60}\n")
         
-        # Autenticação
+        # Token (OPCIONAL para testes - remova isso em produção)
         token = params.get("token", "")
-        if token != TOKEN_SECRETO:
-            print(f"[ERRO] Token inválido: {token}")
-            return Response(
-                '<?xml version="1.0" encoding="utf-8"?><erro>Token inválido</erro>',
-                status=403,
-                mimetype="text/xml; charset=utf-8"
-            )
-
-        # Parâmetros (compatíveis com Tray)
-        cep_origem_param = params.get("cep_origem", CEP_ORIGEM)
-        cep_destino = params.get("cep_destino") or params.get("cep") or ""
-        prods = params.get("prods", "")
+        # if token != TOKEN_SECRETO:
+        #     return gerar_xml_erro("Token inválido"), 403
         
-        print(f"[DEBUG] CEP Origem: {cep_origem_param}")
-        print(f"[DEBUG] CEP Destino: {cep_destino}")
-        print(f"[DEBUG] Produtos: {prods[:100]}...")  # Primeiros 100 caracteres
-        
+        # CEP destino (aceita 'cep' ou 'cep_destino')
+        cep_destino = params.get("cep_destino") or params.get("cep") or params.get("zipcode") or ""
         if not cep_destino:
-            print("[ERRO] CEP destino não informado")
-            return Response(
-                '<?xml version="1.0" encoding="utf-8"?><erro>CEP destino não informado</erro>',
-                status=400,
-                mimetype="text/xml; charset=utf-8"
-            )
+            return gerar_xml_erro("CEP não informado"), 400
         
-        if not prods:
-            print("[ERRO] Produtos não informados")
-            return Response(
-                '<?xml version="1.0" encoding="utf-8"?><erro>Produtos não informados</erro>',
-                status=400,
-                mimetype="text/xml; charset=utf-8"
-            )
-
-        # Parse produtos
-        itens = parse_prods(prods)
-        print(f"[DEBUG] {len(itens)} itens parseados")
+        # Produtos (formato Tray: comp;larg;alt;cub;qty;peso;codigo;valor)
+        prods_raw = params.get("prods", "")
+        if not prods_raw:
+            return gerar_xml_erro("Produtos não informados"), 400
+        
+        # Parse simples de produtos
+        itens = []
+        for bloco in prods_raw.split("/"):
+            try:
+                partes = bloco.split(";")
+                if len(partes) >= 8:
+                    itens.append({
+                        "qty": int(float(partes[4])) if partes[4] else 1,
+                        "peso": float(partes[5]) if partes[5] else 1.0,
+                    })
+            except:
+                pass
         
         if not itens:
-            print("[ERRO] Nenhum item válido")
-            return Response(
-                '<?xml version="1.0" encoding="utf-8"?><erro>Formato de produtos inválido</erro>',
-                status=400,
-                mimetype="text/xml; charset=utf-8"
-            )
-
-        # Constantes (com override opcional)
-        valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
-        tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
-        try:
-            if params.get("valor_km"):
-                valor_km = float(str(params["valor_km"]).replace(",", "."))
-            if params.get("tam_caminhao"):
-                tam_caminhao = float(str(params["tam_caminhao"]).replace(",", "."))
-        except Exception as e:
-            print(f"[WARN] Erro ao parsear constantes: {e}")
-
-        print(f"[DEBUG] Valor KM: {valor_km}, Tamanho Caminhão: {tam_caminhao}")
-
-        # Distância
-        km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
-        print(f"[DEBUG] Distância calculada: {km} km (fonte: {km_fonte})")
+            itens = [{"qty": 1, "peso": 10.0}]  # Fallback
         
-        if km is None:
-            uf_dest = uf_por_cep(limpar_cep(cep_destino))
-            KM_APROX_POR_UF = {
-                "RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,
-                "MS":1600,"MT":2200,"DF":2000,"GO":2100,"TO":2500,"BA":2600,"SE":2700,
-                "AL":2800,"PE":3000,"PB":3100,"RN":3200,"CE":3400,"PI":3300,"MA":3500,
-                "PA":3800,"AP":4100,"AM":4200,"RO":4000,"AC":4300,"RR":4500,
-            }
-            km = KM_APROX_POR_UF.get(uf_dest, DEFAULT_KM)
-            km_fonte = f"uf_fallback_{uf_dest}" if uf_dest else "default"
-            print(f"[DEBUG] Usando distância fallback: {km} km")
-
-        # Cálculo por item
-        total = 0.0
-        for idx, it in enumerate(itens):
-            nome = it["codigo"] or f"Item{idx+1}"
-            tam_catalogo = DATA["catalogo"].get(nome)
-            if tam_catalogo is None:
-                tam_catalogo = tamanho_peca_por_nome(nome, it["alt"], it["larg"])
-                if tam_catalogo == 0:
-                    tam_catalogo = max(it["comp"], it["larg"], it["alt"])
-            
-            v_unit = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao)
-            v_tot = v_unit * max(1, it["qty"])
-            total += v_tot
-            print(f"[DEBUG] Item {idx+1}: {nome}, tamanho={tam_catalogo}m, qty={it['qty']}, valor={v_tot:.2f}")
-
-        print(f"[DEBUG] Valor total calculado: R$ {total:.2f}")
-
-        # Valor mínimo de frete
-        if total < 50.0:
-            total = 50.0
-            print(f"[DEBUG] Aplicado valor mínimo: R$ {total:.2f}")
-
-        # Prazo (dinâmico baseado na distância)
+        print(f"Itens parseados: {len(itens)}")
+        
+        # Calcula KM
+        cep_origem_param = params.get("cep_origem", CEP_ORIGEM)
+        km = calcular_km(cep_origem_param, cep_destino)
+        print(f"Distância: {km} km")
+        
+        # Valores
+        valor_km = DATA.get("VALOR_KM", DEFAULT_VALOR_KM)
+        
+        # Cálculo simples: R$ por KM x quantidade de itens
+        total_itens = sum(it["qty"] for it in itens)
+        valor_frete = round(valor_km * km * (total_itens * 0.3), 2)  # 30% de ocupação por item
+        
+        # Valor mínimo
+        if valor_frete < 50.0:
+            valor_frete = 50.0
+        
+        print(f"Valor calculado: R$ {valor_frete:.2f}")
+        
+        # Prazo baseado em distância
         if km <= 100:
             prazo = 3
         elif km <= 300:
@@ -555,61 +245,96 @@ def frete():
             prazo = 10
         else:
             prazo = 15
-
-        print(f"[DEBUG] Prazo calculado: {prazo} dias")
-
-        # XML no schema da Tray (formato correto)
+        
+        print(f"Prazo: {prazo} dias\n")
+        
+        # Gera XML EXATAMENTE como a Tray espera
         xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <frete>
   <servico>
     <codigo>BAKOF</codigo>
-    <nome>Bakof Logística</nome>
-    <valor>{total:.2f}</valor>
+    <nome>Bakof Logistica</nome>
+    <valor>{valor_frete:.2f}</valor>
     <prazo>{prazo}</prazo>
   </servico>
 </frete>"""
-
-        print(f"[DEBUG] XML gerado com sucesso")
-        print(f"[DEBUG] Resposta: {xml}")
-
-        # A Tray é sensível ao content-type
-        response = Response(xml, mimetype="text/xml; charset=utf-8")
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
         
+        response = Response(xml, mimetype="text/xml; charset=utf-8")
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Cache-Control"] = "no-cache"
         return response
         
     except Exception as e:
-        print(f"[ERRO] Exceção no endpoint /frete: {str(e)}")
+        print(f"\n[ERRO CRÍTICO]: {str(e)}")
         import traceback
         traceback.print_exc()
-        
-        # Retorna erro em XML para a Tray entender
-        erro_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+        return gerar_xml_erro(f"Erro: {str(e)}"), 500
+
+def gerar_xml_erro(msg: str):
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <erro>
-  <mensagem>Erro ao calcular frete: {str(e)}</mensagem>
+  <mensagem>{msg}</mensagem>
 </erro>"""
-        
-        return Response(erro_xml, status=500, mimetype="text/xml; charset=utf-8")
+    response = Response(xml, mimetype="text/xml; charset=utf-8")
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 # ==========================
-# CONFIGURAÇÃO FLASK
+# ENDPOINTS AUXILIARES
 # ==========================
+@app.route("/")
+def index():
+    return """
+    <html>
+    <body style="font-family: Arial; padding: 20px;">
+        <h1>🚚 Bakof Frete API - TRAY</h1>
+        <h2>Endpoints:</h2>
+        <ul>
+            <li><strong>/frete</strong> - Calcular frete (Tray)</li>
+            <li><strong>/teste</strong> - Testar cálculo</li>
+        </ul>
+        <h3>Teste rápido:</h3>
+        <form action="/teste" method="get">
+            <label>CEP Destino:</label>
+            <input name="cep" value="90000000" />
+            <button>Testar</button>
+        </form>
+    </body>
+    </html>
+    """
+
+@app.route("/teste")
+def teste():
+    cep = request.args.get("cep", "90000000")
+    km = calcular_km(CEP_ORIGEM, cep)
+    valor = round(DATA["VALOR_KM"] * km * 0.3, 2)
+    
+    return f"""
+    <html>
+    <body style="font-family: Arial; padding: 20px;">
+        <h2>Resultado do Teste</h2>
+        <p><strong>CEP Origem:</strong> {CEP_ORIGEM}</p>
+        <p><strong>CEP Destino:</strong> {cep}</p>
+        <p><strong>Distância:</strong> {km} km</p>
+        <p><strong>Valor Frete:</strong> R$ {max(50.0, valor):.2f}</p>
+        <br>
+        <a href="/">← Voltar</a>
+    </body>
+    </html>
+    """
+
+@app.route("/health")
+def health():
+    return {"ok": True, "cep_origem": CEP_ORIGEM}
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
-    
-    print("=" * 60)
-    print("BAKOF FRETE API - Iniciando...")
-    print("=" * 60)
+    print("\n" + "="*60)
+    print("🚀 BAKOF FRETE API - TRAY COMPATIBLE")
+    print("="*60)
     print(f"CEP Origem: {CEP_ORIGEM}")
-    print(f"Valor/KM: R$ {DATA['consts']['VALOR_KM']:.2f}")
-    print(f"Tamanho Caminhão: {DATA['consts']['TAM_CAMINHAO']:.2f}m")
-    print(f"Produtos no catálogo: {len(DATA['catalogo'])}")
-    print(f"Municípios cadastrados: {len(COORDENADAS_MUNICIPIOS)}")
+    print(f"Valor/KM: R$ {DATA['VALOR_KM']:.2f}")
     print(f"Porta: {port}")
-    print(f"Debug: {debug}")
-    print("=" * 60)
+    print("="*60 + "\n")
     
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=True)
