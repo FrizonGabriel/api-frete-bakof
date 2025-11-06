@@ -568,4 +568,4 @@ def frete():
     municipio_info = ""
     if detalhes.get("municipio_origem") and detalhes.get("municipio_destino"):
         municipio_info = (f"municipio_origem='{detalhes['municipio_origem']}' "
-                         f"municipio_destino
+                         f"municipio_destino='{detalhes['municipio_destino']}' ")
