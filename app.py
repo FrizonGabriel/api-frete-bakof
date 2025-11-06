@@ -4,7 +4,7 @@ import math
 import re
 from typing import Dict, Any, List, Tuple, Optional
 import pandas as pd
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 
 # ==========================
 # CONFIGURAÇÕES
@@ -105,9 +105,9 @@ COORDENADAS_MUNICIPIOS = {
     "CUIABA-MT": (-15.6014, -56.0979),
 }
 
-# Mapeamento CEP -> Município
+# Mapeamento CEP -> Município (faixas resumidas)
 FAIXAS_CEP_MUNICIPIO = [
-    # RS - Principais
+    # RS
     ("98400000", "98419999", "FREDERICO WESTPHALEN-RS"),
     ("90000000", "91999999", "PORTO ALEGRE-RS"),
     ("95000000", "95130999", "CAXIAS DO SUL-RS"),
@@ -116,18 +116,18 @@ FAIXAS_CEP_MUNICIPIO = [
     ("97000000", "97119999", "SANTA MARIA-RS"),
     ("99000000", "99099999", "PASSO FUNDO-RS"),
     ("99700000", "99799999", "ERECHIM-RS"),
-    # SC - Principais
+    # SC
     ("88000000", "88099999", "FLORIANOPOLIS-SC"),
     ("89200000", "89239999", "JOINVILLE-SC"),
     ("89000000", "89099999", "BLUMENAU-SC"),
     ("89800000", "89879999", "CHAPECO-SC"),
-    # PR - Principais
+    # PR
     ("80000000", "82999999", "CURITIBA-PR"),
     ("86000000", "86199999", "LONDRINA-PR"),
     ("87000000", "87099999", "MARINGA-PR"),
     ("85800000", "85879999", "CASCAVEL-PR"),
     ("85850000", "85869999", "FOZ DO IGUACU-PR"),
-    # SP - Principais
+    # SP
     ("01000000", "05999999", "SAO PAULO-SP"),
     ("07000000", "07399999", "GUARULHOS-SP"),
     ("13000000", "13149999", "CAMPINAS-SP"),
@@ -135,10 +135,10 @@ FAIXAS_CEP_MUNICIPIO = [
     ("11000000", "11999999", "SANTOS-SP"),
     ("12200000", "12249999", "SAO JOSE DOS CAMPOS-SP"),
     ("14000000", "14109999", "RIBEIRAO PRETO-SP"),
-    # RJ - Principais
+    # RJ
     ("20000000", "23799999", "RIO DE JANEIRO-RJ"),
     ("24000000", "24999999", "NITEROI-RJ"),
-    # MG - Principais
+    # MG
     ("30000000", "31999999", "BELO HORIZONTE-MG"),
     ("32000000", "32999999", "CONTAGEM-MG"),
     # DF
@@ -149,23 +149,17 @@ FAIXAS_CEP_MUNICIPIO = [
 # FUNÇÕES DE CÁLCULO
 # ==========================
 def limpar_cep(cep: str) -> str:
-    """Remove formatação e retorna 8 dígitos"""
     s = re.sub(r'\D', '', str(cep or ""))
     return s[:8].zfill(8) if s else "00000000"
 
 def buscar_municipio_por_cep(cep: str) -> Optional[str]:
-    """Busca município baseado em faixas de CEP locais"""
     cep_limpo = limpar_cep(cep)
     cep_num = int(cep_limpo)
-    
     for inicio, fim, municipio in FAIXAS_CEP_MUNICIPIO:
         if int(inicio) <= cep_num <= int(fim):
             return municipio
-    
-    # Fallback: busca por UF
     uf = uf_por_cep(cep_limpo)
     if uf:
-        # Retorna capital da UF
         capitais = {
             "RS": "PORTO ALEGRE-RS",
             "SC": "FLORIANOPOLIS-SC",
@@ -176,72 +170,48 @@ def buscar_municipio_por_cep(cep: str) -> Optional[str]:
             "DF": "BRASILIA-DF",
         }
         return capitais.get(uf)
-    
     return None
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calcula distância em KM entre dois pontos"""
-    R = 6371  # Raio da Terra em km
-    
+    R = 6371
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)
-    delta_lat = math.radians(lat2 - lat1)
-    delta_lon = math.radians(lon2 - lon1)
-    
-    a = math.sin(delta_lat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon/2)**2
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    
     return R * c
 
 def calcular_distancia_real(cep_origem: str, cep_destino: str) -> Tuple[Optional[float], str, Dict[str, Any]]:
-    """
-    Calcula distância real usando tabela local de coordenadas
-    Retorna: (km, fonte, detalhes)
-    """
     detalhes = {
         "cep_origem": cep_origem,
         "cep_destino": cep_destino,
         "municipio_origem": None,
         "municipio_destino": None,
     }
-    
-    # Busca municípios
     muni_origem = buscar_municipio_por_cep(cep_origem)
     muni_destino = buscar_municipio_por_cep(cep_destino)
-    
     detalhes["municipio_origem"] = muni_origem
     detalhes["municipio_destino"] = muni_destino
-    
+
     if not muni_origem or not muni_destino:
         return (None, "municipio_nao_encontrado", detalhes)
-    
-    # Verifica se é mesmo município
+
     if muni_origem == muni_destino:
         return (10.0, "mesmo_municipio", detalhes)
-    
-    # Busca coordenadas
+
     coord_origem = COORDENADAS_MUNICIPIOS.get(muni_origem)
     coord_destino = COORDENADAS_MUNICIPIOS.get(muni_destino)
-    
     if not coord_origem or not coord_destino:
         return (None, "coordenadas_nao_encontradas", detalhes)
-    
-    # Calcula distância
-    lat1, lon1 = coord_origem
-    lat2, lon2 = coord_destino
-    km = haversine(lat1, lon1, lat2, lon2)
-    
-    # Ajusta distância (rodovias são ~15% mais longas que linha reta)
-    km = km * 1.15
-    
-    # Arredonda para múltiplos de 5
+
+    km = haversine(coord_origem[0], coord_origem[1], coord_destino[0], coord_destino[1])
+    km *= 1.15  # rodovia ~15% maior que linha reta
     km = round(km / 5) * 5
     km = max(10.0, km)
-    
     return (km, "distancia_calculada", detalhes)
 
 def uf_por_cep(cep8: str) -> Optional[str]:
-    """Retorna UF baseado na faixa de CEP"""
     UF_CEP_RANGES = [
         ("SP","01000000","19999999"),("RJ","20000000","28999999"),
         ("ES","29000000","29999999"),("MG","30000000","39999999"),
@@ -270,61 +240,49 @@ def uf_por_cep(cep8: str) -> Optional[str]:
 # FUNÇÕES DA PLANILHA
 # ==========================
 def limpar_texto(nome: Any) -> str:
-    if not isinstance(nome, str):
-        return ""
+    if not isinstance(nome, str): return ""
     return " ".join(nome.replace("\n"," ").split()).strip()
 
 def extrai_numero_linha(row) -> Optional[float]:
     for v in row:
-        if v is None or pd.isna(v):
-            continue
+        if v is None or pd.isna(v): continue
         s = str(v).strip().upper()
-        if s in ("", "NAN", "NONE", "NULL"):
-            continue
+        if s in ("", "NAN", "NONE", "NULL"): continue
         s = s.replace(",", ".")
         s = re.sub(r'(METROS?|KM|R\$|REAIS|/KM)', '', s, flags=re.IGNORECASE).strip()
         try:
             f = float(s)
-            if math.isfinite(f) and f > 0:
-                return f
-        except:
-            pass
+            if math.isfinite(f) and f > 0: return f
+        except: pass
     return None
 
 def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
     valor_km = DEFAULT_VALOR_KM
     tam_caminhao = DEFAULT_TAM_CAMINHAO
-    
     for aba in ("BASE_CALCULO", "D", "BASE", "CONSTANTES"):
-        if aba not in xls.sheet_names:
-            continue
+        if aba not in xls.sheet_names: continue
         try:
             raw = pd.read_excel(xls, aba, header=None)
             for _, row in raw.iterrows():
                 texto = " ".join([str(v).upper() for v in row if isinstance(v, str)])
                 if "VALOR" in texto or "KM" in texto:
                     num = extrai_numero_linha(row)
-                    if num and 3 <= num <= 50:
-                        valor_km = num
+                    if num and 3 <= num <= 50: valor_km = num
                 if "TAMANHO" in texto and "CAMINH" in texto:
                     num = extrai_numero_linha(row)
-                    if num and 3 <= num <= 20:
-                        tam_caminhao = num
+                    if num and 3 <= num <= 20: tam_caminhao = num
         except Exception as e:
             print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    
     return {"VALOR_KM": valor_km, "TAM_CAMINHAO": tam_caminhao}
 
 def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
     for aba in ("CADASTRO_PRODUTO", "CADASTRO", "PRODUTOS"):
-        if aba not in xls.sheet_names:
-            continue
+        if aba not in xls.sheet_names: continue
         try:
             raw = pd.read_excel(xls, aba, header=None)
             nome_col = 2 if raw.shape[1] > 2 else 0
             dim1_col = 3 if raw.shape[1] > 3 else (1 if raw.shape[1] > 1 else 0)
             dim2_col = 4 if raw.shape[1] > 4 else (2 if raw.shape[1] > 2 else 1)
-            
             df = raw[[nome_col, dim1_col, dim2_col]].copy()
             df.columns = ["nome", "dim1", "dim2"]
             df["nome"] = df["nome"].apply(limpar_texto)
@@ -336,39 +294,30 @@ def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
             return df[["nome", "dim1", "dim2"]]
         except Exception as e:
             print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    
     return pd.DataFrame(columns=["nome", "dim1", "dim2"])
 
 def tipo_produto(nome: str) -> str:
     n = (nome or "").lower()
-    if "fossa" in n:
-        return "fossa"
-    if "vertical" in n:
-        return "vertical"
-    if "horizontal" in n:
-        return "horizontal"
-    if "tc" in n and ("10.000" in n or "10000" in n or "10.0" in n):
-        return "tc_ate_10k"
+    if "fossa" in n: return "fossa"
+    if "vertical" in n: return "vertical"
+    if "horizontal" in n: return "horizontal"
+    if "tc" in n and ("10.000" in n or "10000" in n or "10.0" in n): return "tc_ate_10k"
     return "auto"
 
 def tamanho_peca_por_nome(nome: str, dim1: float, dim2: float) -> float:
     t = tipo_produto(nome)
-    if t in ("fossa", "vertical"):
-        return float(dim1 or 0.0)
-    if t in ("horizontal", "tc_ate_10k"):
-        return float(dim2 or 0.0)
+    if t in ("fossa", "vertical"):  return float(dim1 or 0.0)
+    if t in ("horizontal", "tc_ate_10k"): return float(dim2 or 0.0)
     return float(max(float(dim1 or 0.0), float(dim2 or 0.0)))
 
 def montar_catalogo_tamanho(df: pd.DataFrame) -> Dict[str, float]:
-    mapa = {}
+    mapa: Dict[str, float] = {}
     for _, r in df.iterrows():
         try:
             nome = limpar_texto(r["nome"])
-            if not nome or nome.upper() in PALAVRAS_IGNORAR:
-                continue
+            if not nome or nome.upper() in PALAVRAS_IGNORAR: continue
             tam = tamanho_peca_por_nome(nome, float(r["dim1"]), float(r["dim2"]))
-            if tam > 0:
-                mapa[nome] = tam
+            if tam > 0: mapa[nome] = tam
         except Exception as e:
             print(f"[WARN] Erro ao processar produto: {e}")
     return mapa
@@ -394,18 +343,14 @@ DATA = carregar_tudo()
 # CÁLCULO DE FRETE
 # ==========================
 def calcula_valor_item(tamanho_peca_m: float, km: float, valor_km: float, tam_caminhao: float) -> float:
-    """Fórmula: (tamanho_peça / tamanho_caminhão) * valor_km * km"""
-    if tamanho_peca_m <= 0 or tam_caminhao <= 0:
-        return 0.0
+    if tamanho_peca_m <= 0 or tam_caminhao <= 0: return 0.0
     ocupacao = float(tamanho_peca_m) / float(tam_caminhao)
     return round(float(valor_km) * float(km) * ocupacao, 2)
 
 def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
-    """Parse dos produtos no formato Tray"""
-    itens = []
-    if not prods_str:
-        return itens
-    
+    itens: List[Dict[str, Any]] = []
+    if not prods_str: return itens
+
     blocos = []
     for sep in ("/", "|"):
         if sep in prods_str:
@@ -415,20 +360,15 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
         blocos = [prods_str]
 
     def norm_num(x):
-        if x is None:
-            return 0.0
+        if x is None: return 0.0
         s = str(x).strip().lower()
-        if s in ("", "null", "none", "nan"):
-            return 0.0
+        if s in ("", "null", "none", "nan"): return 0.0
         s = s.replace(",", ".")
-        try:
-            return float(s)
-        except:
-            return 0.0
+        try: return float(s)
+        except: return 0.0
 
     def cm_to_m(x):
-        if not x or x == 0:
-            return 0.0
+        if not x or x == 0: return 0.0
         return x/100.0 if x > 20 else x
 
     for raw in blocos:
@@ -450,7 +390,6 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
             itens.append(item)
         except Exception as e:
             print(f"[WARN] Erro parse item: {raw} - {e}")
-    
     return itens
 
 # ==========================
@@ -482,11 +421,17 @@ def health():
 
 @app.route("/municipios")
 def listar_municipios():
-    """Lista todos os municípios disponíveis"""
     return {
         "total": len(COORDENADAS_MUNICIPIOS),
         "municipios": sorted(list(COORDENADAS_MUNICIPIOS.keys()))
     }
+
+@app.route("/teste-distancia")
+def teste_distancia():
+    a = request.args.get("a", CEP_ORIGEM)
+    b = request.args.get("b", "")
+    km, fonte, det = calcular_distancia_real(a, b)
+    return jsonify({"km": km, "fonte": fonte, "detalhes": det})
 
 @app.route("/frete")
 def frete():
@@ -495,11 +440,10 @@ def frete():
     if token != TOKEN_SECRETO:
         return Response("Token inválido", status=403)
 
-    # Parâmetros
+    # Parâmetros obrigatórios
     cep_origem_param = request.args.get("cep_origem", CEP_ORIGEM)
     cep_destino = request.args.get("cep_destino", "")
     prods = request.args.get("prods", "")
-
     if not cep_destino or not prods:
         return Response("Parâmetros insuficientes (cep_destino, prods)", status=400)
 
@@ -508,11 +452,9 @@ def frete():
     if not itens:
         return Response("Nenhum item válido em 'prods'", status=400)
 
-    # Constantes base
+    # Constantes (com override opcional)
     valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
     tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
-
-    # Permite override via parâmetro
     try:
         if request.args.get("valor_km"):
             valor_km = float(str(request.args["valor_km"]).replace(",", "."))
@@ -521,11 +463,9 @@ def frete():
     except:
         pass
 
-    # Calcula distância
+    # Distância
     km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
-    
     if km is None:
-        # Fallback por UF
         uf_dest = uf_por_cep(limpar_cep(cep_destino))
         KM_APROX_POR_UF = {
             "RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,
@@ -536,25 +476,19 @@ def frete():
         km = KM_APROX_POR_UF.get(uf_dest, DEFAULT_KM)
         km_fonte = f"uf_fallback_{uf_dest}" if uf_dest else "default"
 
-    # Calcula frete por produto
+    # Cálculo por item
     total = 0.0
     itens_xml = []
-    
     for it in itens:
         nome = it["codigo"] or "Item"
-        
-        # Busca tamanho no catálogo
         tam_catalogo = DATA["catalogo"].get(nome)
         if tam_catalogo is None:
             tam_catalogo = tamanho_peca_por_nome(nome, it["alt"], it["larg"])
             if tam_catalogo == 0:
                 tam_catalogo = max(it["comp"], it["larg"], it["alt"])
-        
-        # Calcula valores
         v_unit = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao)
         v_tot = v_unit * max(1, it["qty"])
         total += v_tot
-        
         itens_xml.append(f"""
       <item>
         <codigo>{nome}</codigo>
@@ -564,8 +498,43 @@ def frete():
         <valor_total>{v_tot:.2f}</valor_total>
       </item>""")
 
-    # Monta resposta XML
+    # XML de resposta
     municipio_info = ""
     if detalhes.get("municipio_origem") and detalhes.get("municipio_destino"):
-        municipio_info = (f"municipio_origem='{detalhes['municipio_origem']}' "
-                         f"municipio_destino='{detalhes['municipio_destino']}' ")
+        municipio_info = (
+            f"municipio_origem='{detalhes['municipio_origem']}' "
+            f"municipio_destino='{detalhes['municipio_destino']}' "
+        )
+
+    debug_info = (
+        f"<debug "
+        f"cep_origem='{cep_origem_param}' "
+        f"cep_destino='{cep_destino}' "
+        f"{municipio_info}"
+        f"km='{km:.1f}' "
+        f"fonte_km='{km_fonte}' "
+        f"valor_km='{valor_km}' "
+        f"tam_caminhao='{tam_caminhao}' "
+        f"total_itens='{len(itens)}'"
+        f"/>"
+    )
+
+    xml = f"""<?xml version="1.0"?>
+<cotacao>
+  <resultado>
+    <codigo>BAKOF</codigo>
+    <transportadora>Bakof Log</transportadora>
+    <servico>Transporte</servico>
+    <transporte>TERRESTRE</transporte>
+    <valor>{total:.2f}</valor>
+    <km_distancia>{km:.1f}</km_distancia>
+    <prazo_min>4</prazo_min>
+    <prazo_max>7</prazo_max>
+    <entrega_domiciliar>1</entrega_domiciliar>
+    <detalhes>{"".join(itens_xml)}
+    </detalhes>
+    {debug_info}
+  </resultado>
+</cotacao>"""
+
+    return Response(xml, mimetype="application/xml")
