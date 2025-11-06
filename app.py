@@ -399,7 +399,7 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
 def index():
     return {
         "api": "Bakof Frete",
-        "versao": "3.0 - Cálculo LOCAL",
+        "versao": "3.1 - Tray Compatible",
         "municipios_disponiveis": len(COORDENADAS_MUNICIPIOS),
         "endpoints": {
             "/health": "Status da API",
@@ -433,76 +433,183 @@ def teste_distancia():
     km, fonte, det = calcular_distancia_real(a, b)
     return jsonify({"km": km, "fonte": fonte, "detalhes": det})
 
-@app.route("/frete")
+@app.route("/frete", methods=["GET", "POST"])
 def frete():
-    # Autenticação
-    token = request.args.get("token", "")
-    if token != TOKEN_SECRETO:
-        return Response("Token inválido", status=403)
-
-    # Parâmetros (compatíveis com Tray)
-    cep_origem_param = request.args.get("cep_origem", CEP_ORIGEM)
-    cep_destino = request.args.get("cep_destino") or request.args.get("cep") or ""
-    prods = request.args.get("prods", "")
-    if not cep_destino or not prods:
-        return Response("Parâmetros insuficientes (cep/cep_destino, prods)", status=400)
-
-    # Parse produtos
-    itens = parse_prods(prods)
-    if not itens:
-        return Response("Nenhum item válido em 'prods'", status=400)
-
-    # Constantes (com override opcional)
-    valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
-    tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
     try:
-        if request.args.get("valor_km"):
-            valor_km = float(str(request.args["valor_km"]).replace(",", "."))
-        if request.args.get("tam_caminhao"):
-            tam_caminhao = float(str(request.args["tam_caminhao"]).replace(",", "."))
-    except:
-        pass
+        # Suporta GET e POST
+        if request.method == "POST":
+            params = request.form.to_dict() if request.form else request.get_json(silent=True) or {}
+        else:
+            params = request.args.to_dict()
+        
+        # Log para debug
+        print(f"[DEBUG] Requisição recebida: {request.method}")
+        print(f"[DEBUG] Parâmetros: {params}")
+        
+        # Autenticação
+        token = params.get("token", "")
+        if token != TOKEN_SECRETO:
+            print(f"[ERRO] Token inválido: {token}")
+            return Response(
+                '<?xml version="1.0" encoding="utf-8"?><erro>Token inválido</erro>',
+                status=403,
+                mimetype="text/xml; charset=utf-8"
+            )
 
-    # Distância
-    km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
-    if km is None:
-        uf_dest = uf_por_cep(limpar_cep(cep_destino))
-        KM_APROX_POR_UF = {
-            "RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,
-            "MS":1600,"MT":2200,"DF":2000,"GO":2100,"TO":2500,"BA":2600,"SE":2700,
-            "AL":2800,"PE":3000,"PB":3100,"RN":3200,"CE":3400,"PI":3300,"MA":3500,
-            "PA":3800,"AP":4100,"AM":4200,"RO":4000,"AC":4300,"RR":4500,
-        }
-        km = KM_APROX_POR_UF.get(uf_dest, DEFAULT_KM)
-        km_fonte = f"uf_fallback_{uf_dest}" if uf_dest else "default"
+        # Parâmetros (compatíveis com Tray)
+        cep_origem_param = params.get("cep_origem", CEP_ORIGEM)
+        cep_destino = params.get("cep_destino") or params.get("cep") or ""
+        prods = params.get("prods", "")
+        
+        print(f"[DEBUG] CEP Origem: {cep_origem_param}")
+        print(f"[DEBUG] CEP Destino: {cep_destino}")
+        print(f"[DEBUG] Produtos: {prods[:100]}...")  # Primeiros 100 caracteres
+        
+        if not cep_destino:
+            print("[ERRO] CEP destino não informado")
+            return Response(
+                '<?xml version="1.0" encoding="utf-8"?><erro>CEP destino não informado</erro>',
+                status=400,
+                mimetype="text/xml; charset=utf-8"
+            )
+        
+        if not prods:
+            print("[ERRO] Produtos não informados")
+            return Response(
+                '<?xml version="1.0" encoding="utf-8"?><erro>Produtos não informados</erro>',
+                status=400,
+                mimetype="text/xml; charset=utf-8"
+            )
 
-    # Cálculo por item
-    total = 0.0
-    for it in itens:
-        nome = it["codigo"] or "Item"
-        tam_catalogo = DATA["catalogo"].get(nome)
-        if tam_catalogo is None:
-            tam_catalogo = tamanho_peca_por_nome(nome, it["alt"], it["larg"])
-            if tam_catalogo == 0:
-                tam_catalogo = max(it["comp"], it["larg"], it["alt"])
-        v_unit = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao)
-        v_tot = v_unit * max(1, it["qty"])
-        total += v_tot
+        # Parse produtos
+        itens = parse_prods(prods)
+        print(f"[DEBUG] {len(itens)} itens parseados")
+        
+        if not itens:
+            print("[ERRO] Nenhum item válido")
+            return Response(
+                '<?xml version="1.0" encoding="utf-8"?><erro>Formato de produtos inválido</erro>',
+                status=400,
+                mimetype="text/xml; charset=utf-8"
+            )
 
-    # Prazo (um único campo, como a Tray costuma esperar)
-    prazo = 7  # use uma regra se quiser dinamizar
+        # Constantes (com override opcional)
+        valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
+        tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
+        try:
+            if params.get("valor_km"):
+                valor_km = float(str(params["valor_km"]).replace(",", "."))
+            if params.get("tam_caminhao"):
+                tam_caminhao = float(str(params["tam_caminhao"]).replace(",", "."))
+        except Exception as e:
+            print(f"[WARN] Erro ao parsear constantes: {e}")
 
-    # XML no schema da Tray
-    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+        print(f"[DEBUG] Valor KM: {valor_km}, Tamanho Caminhão: {tam_caminhao}")
+
+        # Distância
+        km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
+        print(f"[DEBUG] Distância calculada: {km} km (fonte: {km_fonte})")
+        
+        if km is None:
+            uf_dest = uf_por_cep(limpar_cep(cep_destino))
+            KM_APROX_POR_UF = {
+                "RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,
+                "MS":1600,"MT":2200,"DF":2000,"GO":2100,"TO":2500,"BA":2600,"SE":2700,
+                "AL":2800,"PE":3000,"PB":3100,"RN":3200,"CE":3400,"PI":3300,"MA":3500,
+                "PA":3800,"AP":4100,"AM":4200,"RO":4000,"AC":4300,"RR":4500,
+            }
+            km = KM_APROX_POR_UF.get(uf_dest, DEFAULT_KM)
+            km_fonte = f"uf_fallback_{uf_dest}" if uf_dest else "default"
+            print(f"[DEBUG] Usando distância fallback: {km} km")
+
+        # Cálculo por item
+        total = 0.0
+        for idx, it in enumerate(itens):
+            nome = it["codigo"] or f"Item{idx+1}"
+            tam_catalogo = DATA["catalogo"].get(nome)
+            if tam_catalogo is None:
+                tam_catalogo = tamanho_peca_por_nome(nome, it["alt"], it["larg"])
+                if tam_catalogo == 0:
+                    tam_catalogo = max(it["comp"], it["larg"], it["alt"])
+            
+            v_unit = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao)
+            v_tot = v_unit * max(1, it["qty"])
+            total += v_tot
+            print(f"[DEBUG] Item {idx+1}: {nome}, tamanho={tam_catalogo}m, qty={it['qty']}, valor={v_tot:.2f}")
+
+        print(f"[DEBUG] Valor total calculado: R$ {total:.2f}")
+
+        # Valor mínimo de frete
+        if total < 50.0:
+            total = 50.0
+            print(f"[DEBUG] Aplicado valor mínimo: R$ {total:.2f}")
+
+        # Prazo (dinâmico baseado na distância)
+        if km <= 100:
+            prazo = 3
+        elif km <= 300:
+            prazo = 5
+        elif km <= 600:
+            prazo = 7
+        elif km <= 1000:
+            prazo = 10
+        else:
+            prazo = 15
+
+        print(f"[DEBUG] Prazo calculado: {prazo} dias")
+
+        # XML no schema da Tray (formato correto)
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <frete>
   <servico>
     <codigo>BAKOF</codigo>
-    <nome>Bakof Log</nome>
+    <nome>Bakof Logística</nome>
     <valor>{total:.2f}</valor>
     <prazo>{prazo}</prazo>
   </servico>
-</frete>
-"""
+</frete>"""
 
-    # A Tray é sensível ao content-type:
-    return Response(xml, mimetype="text/xml; charset=utf-8")
+        print(f"[DEBUG] XML gerado com sucesso")
+        print(f"[DEBUG] Resposta: {xml}")
+
+        # A Tray é sensível ao content-type
+        response = Response(xml, mimetype="text/xml; charset=utf-8")
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
+        
+    except Exception as e:
+        print(f"[ERRO] Exceção no endpoint /frete: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Retorna erro em XML para a Tray entender
+        erro_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<erro>
+  <mensagem>Erro ao calcular frete: {str(e)}</mensagem>
+</erro>"""
+        
+        return Response(erro_xml, status=500, mimetype="text/xml; charset=utf-8")
+
+# ==========================
+# CONFIGURAÇÃO FLASK
+# ==========================
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+    
+    print("=" * 60)
+    print("BAKOF FRETE API - Iniciando...")
+    print("=" * 60)
+    print(f"CEP Origem: {CEP_ORIGEM}")
+    print(f"Valor/KM: R$ {DATA['consts']['VALOR_KM']:.2f}")
+    print(f"Tamanho Caminhão: {DATA['consts']['TAM_CAMINHAO']:.2f}m")
+    print(f"Produtos no catálogo: {len(DATA['catalogo'])}")
+    print(f"Municípios cadastrados: {len(COORDENADAS_MUNICIPIOS)}")
+    print(f"Porta: {port}")
+    print(f"Debug: {debug}")
+    print("=" * 60)
+    
+    app.run(host="0.0.0.0", port=port, debug=debug)
