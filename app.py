@@ -1,28 +1,10 @@
-# app.py — API de Frete com cálculo de distância entre municípios
+# app.py — API de Frete com cálculo de distância LOCAL (sem APIs externas)
 import os
 import math
 import re
-import time
-import unicodedata
 from typing import Dict, Any, List, Tuple, Optional
-
-try:
-    import requests
-except ImportError:
-    print("ERRO: requests não instalado. Execute: pip install requests")
-    requests = None
-
-try:
-    import pandas as pd
-except ImportError:
-    print("ERRO: pandas não instalado. Execute: pip install pandas openpyxl")
-    pd = None
-
-try:
-    from flask import Flask, request, Response
-except ImportError:
-    print("ERRO: flask não instalado. Execute: pip install flask")
-    Flask = None
+import pandas as pd
+from flask import Flask, request, Response
 
 # ==========================
 # CONFIGURAÇÕES
@@ -40,143 +22,165 @@ PALAVRAS_IGNORAR = {
     "CALCULO DE FRETE POR TAMANHO DE PEÇA", "CÁLCULO DE FRETE POR TAMANHO DE PEÇA"
 }
 
-# Cache em memória
-cache_coordenadas_municipio = {}
-
 app = Flask(__name__)
 
 # ==========================
-# FUNÇÕES DE CEP E MUNICÍPIO
+# TABELA DE COORDENADAS LOCAL (sem API)
+# ==========================
+COORDENADAS_MUNICIPIOS = {
+    # Rio Grande do Sul
+    "FREDERICO WESTPHALEN-RS": (-27.3594, -53.3937),
+    "PORTO ALEGRE-RS": (-30.0346, -51.2177),
+    "CAXIAS DO SUL-RS": (-29.1634, -51.1797),
+    "PELOTAS-RS": (-31.7654, -52.3376),
+    "CANOAS-RS": (-29.9177, -51.1844),
+    "SANTA MARIA-RS": (-29.6868, -53.8149),
+    "GRAVATAI-RS": (-29.9419, -50.9928),
+    "VIAMAO-RS": (-30.0811, -51.0233),
+    "NOVO HAMBURGO-RS": (-29.6783, -51.1306),
+    "SAO LEOPOLDO-RS": (-29.7600, -51.1479),
+    "ALVORADA-RS": (-30.0011, -51.0797),
+    "PASSO FUNDO-RS": (-28.2620, -52.4083),
+    "SAPUCAIA DO SUL-RS": (-29.8389, -51.1447),
+    "URUGUAIANA-RS": (-29.7547, -57.0883),
+    "SANTA CRUZ DO SUL-RS": (-29.7175, -52.4261),
+    "CACHOEIRINHA-RS": (-29.9508, -51.0944),
+    "ERECHIM-RS": (-27.6336, -52.2736),
+    "GUAIBA-RS": (-30.1139, -51.3253),
+    "SANTANA DO LIVRAMENTO-RS": (-30.8908, -55.5322),
+    "BAGE-RS": (-31.3286, -54.1072),
+    # Santa Catarina
+    "FLORIANOPOLIS-SC": (-27.5954, -48.5480),
+    "JOINVILLE-SC": (-26.3045, -48.8487),
+    "BLUMENAU-SC": (-26.9194, -49.0661),
+    "SAO JOSE-SC": (-27.6108, -48.6350),
+    "CHAPECO-SC": (-27.0965, -52.6146),
+    "CRICIUMA-SC": (-28.6773, -49.3695),
+    "ITAJAI-SC": (-26.9075, -48.6614),
+    "JARAGUA DO SUL-SC": (-26.4869, -49.0669),
+    "LAGES-SC": (-27.8160, -50.3264),
+    "PALHOCA-SC": (-27.6450, -48.6700),
+    # Paraná
+    "CURITIBA-PR": (-25.4284, -49.2733),
+    "LONDRINA-PR": (-23.3045, -51.1696),
+    "MARINGA-PR": (-23.4205, -51.9333),
+    "PONTA GROSSA-PR": (-25.0916, -50.1668),
+    "CASCAVEL-PR": (-24.9555, -53.4552),
+    "SAO JOSE DOS PINHAIS-PR": (-25.5304, -49.2064),
+    "FOZ DO IGUACU-PR": (-25.5163, -54.5854),
+    "COLOMBO-PR": (-25.2919, -49.2244),
+    "GUARAPUAVA-PR": (-25.3905, -51.4628),
+    "PARANAGUA-PR": (-25.5200, -48.5089),
+    # São Paulo
+    "SAO PAULO-SP": (-23.5505, -46.6333),
+    "GUARULHOS-SP": (-23.4538, -46.5333),
+    "CAMPINAS-SP": (-22.9099, -47.0626),
+    "SAO BERNARDO DO CAMPO-SP": (-23.6914, -46.5647),
+    "SANTO ANDRE-SP": (-23.6636, -46.5341),
+    "OSASCO-SP": (-23.5329, -46.7919),
+    "SAO JOSE DOS CAMPOS-SP": (-23.1791, -45.8872),
+    "RIBEIRAO PRETO-SP": (-21.1767, -47.8103),
+    "SOROCABA-SP": (-23.5015, -47.4526),
+    "SANTOS-SP": (-23.9608, -46.3336),
+    # Rio de Janeiro
+    "RIO DE JANEIRO-RJ": (-22.9068, -43.1729),
+    "SAO GONCALO-RJ": (-22.8268, -43.0534),
+    "DUQUE DE CAXIAS-RJ": (-22.7858, -43.3054),
+    "NOVA IGUACU-RJ": (-22.7591, -43.4509),
+    "NITEROI-RJ": (-22.8839, -43.1039),
+    # Minas Gerais
+    "BELO HORIZONTE-MG": (-19.9167, -43.9345),
+    "UBERLANDIA-MG": (-18.9186, -48.2772),
+    "CONTAGEM-MG": (-19.9320, -44.0539),
+    "JUIZ DE FORA-MG": (-21.7642, -43.3502),
+    # Outras capitais
+    "BRASILIA-DF": (-15.8267, -47.9218),
+    "SALVADOR-BA": (-12.9714, -38.5014),
+    "FORTALEZA-CE": (-3.7172, -38.5433),
+    "RECIFE-PE": (-8.0476, -34.8770),
+    "MANAUS-AM": (-3.1190, -60.0217),
+    "GOIANIA-GO": (-16.6869, -49.2648),
+    "VITORIA-ES": (-20.3155, -40.3128),
+    "CAMPO GRANDE-MS": (-20.4697, -54.6201),
+    "CUIABA-MT": (-15.6014, -56.0979),
+}
+
+# Mapeamento CEP -> Município
+FAIXAS_CEP_MUNICIPIO = [
+    # RS - Principais
+    ("98400000", "98419999", "FREDERICO WESTPHALEN-RS"),
+    ("90000000", "91999999", "PORTO ALEGRE-RS"),
+    ("95000000", "95130999", "CAXIAS DO SUL-RS"),
+    ("96000000", "96099999", "PELOTAS-RS"),
+    ("92000000", "92999999", "CANOAS-RS"),
+    ("97000000", "97119999", "SANTA MARIA-RS"),
+    ("99000000", "99099999", "PASSO FUNDO-RS"),
+    ("99700000", "99799999", "ERECHIM-RS"),
+    # SC - Principais
+    ("88000000", "88099999", "FLORIANOPOLIS-SC"),
+    ("89200000", "89239999", "JOINVILLE-SC"),
+    ("89000000", "89099999", "BLUMENAU-SC"),
+    ("89800000", "89879999", "CHAPECO-SC"),
+    # PR - Principais
+    ("80000000", "82999999", "CURITIBA-PR"),
+    ("86000000", "86199999", "LONDRINA-PR"),
+    ("87000000", "87099999", "MARINGA-PR"),
+    ("85800000", "85879999", "CASCAVEL-PR"),
+    ("85850000", "85869999", "FOZ DO IGUACU-PR"),
+    # SP - Principais
+    ("01000000", "05999999", "SAO PAULO-SP"),
+    ("07000000", "07399999", "GUARULHOS-SP"),
+    ("13000000", "13149999", "CAMPINAS-SP"),
+    ("09700000", "09899999", "SAO BERNARDO DO CAMPO-SP"),
+    ("11000000", "11999999", "SANTOS-SP"),
+    ("12200000", "12249999", "SAO JOSE DOS CAMPOS-SP"),
+    ("14000000", "14109999", "RIBEIRAO PRETO-SP"),
+    # RJ - Principais
+    ("20000000", "23799999", "RIO DE JANEIRO-RJ"),
+    ("24000000", "24999999", "NITEROI-RJ"),
+    # MG - Principais
+    ("30000000", "31999999", "BELO HORIZONTE-MG"),
+    ("32000000", "32999999", "CONTAGEM-MG"),
+    # DF
+    ("70000000", "72799999", "BRASILIA-DF"),
+]
+
+# ==========================
+# FUNÇÕES DE CÁLCULO
 # ==========================
 def limpar_cep(cep: str) -> str:
     """Remove formatação e retorna 8 dígitos"""
     s = re.sub(r'\D', '', str(cep or ""))
     return s[:8].zfill(8) if s else "00000000"
 
-def normalizar_municipio(nome: str) -> str:
-    """Normaliza nome do município (remove acentos, maiúsculas)"""
-    if not nome:
-        return ""
-    # Remove acentos
-    nfkd = unicodedata.normalize('NFKD', nome)
-    sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
-    return sem_acento.upper().strip()
-
-def buscar_municipio_por_cep(cep: str) -> Optional[Tuple[str, str]]:
-    """
-    Busca município e UF a partir do CEP
-    Retorna: (municipio, uf) ou None
-    """
+def buscar_municipio_por_cep(cep: str) -> Optional[str]:
+    """Busca município baseado em faixas de CEP locais"""
     cep_limpo = limpar_cep(cep)
+    cep_num = int(cep_limpo)
     
-    if len(cep_limpo) != 8 or cep_limpo == "00000000":
-        return None
+    for inicio, fim, municipio in FAIXAS_CEP_MUNICIPIO:
+        if int(inicio) <= cep_num <= int(fim):
+            return municipio
     
-    # Tenta ViaCEP
-    try:
-        url = f"https://viacep.com.br/ws/{cep_limpo}/json/"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if not data.get("erro"):
-                municipio = normalizar_municipio(data.get("localidade", ""))
-                uf = data.get("uf", "").upper()
-                if municipio and uf:
-                    return (municipio, uf)
-    except Exception as e:
-        print(f"[WARN] Erro ViaCEP para {cep_limpo}: {e}")
-    
-    return None
-
-def buscar_coordenadas_municipio(municipio: str, uf: str) -> Optional[Tuple[float, float]]:
-    """
-    Busca coordenadas do centro geográfico do município
-    Retorna: (latitude, longitude) ou None
-    """
-    chave = f"{municipio}-{uf}"
-    
-    # Verifica cache
-    if chave in cache_coordenadas_municipio:
-        return cache_coordenadas_municipio[chave]
-    
-    # Primeiro tenta base conhecida (mais rápido)
-    coord = _coordenadas_conhecidas(municipio, uf)
-    if coord:
-        cache_coordenadas_municipio[chave] = coord
-        return coord
-    
-    # Tenta Nominatim OpenStreetMap
-    try:
-        query = f"{municipio}, {uf}, Brasil"
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": query,
-            "format": "json",
-            "limit": 1
+    # Fallback: busca por UF
+    uf = uf_por_cep(cep_limpo)
+    if uf:
+        # Retorna capital da UF
+        capitais = {
+            "RS": "PORTO ALEGRE-RS",
+            "SC": "FLORIANOPOLIS-SC",
+            "PR": "CURITIBA-PR",
+            "SP": "SAO PAULO-SP",
+            "RJ": "RIO DE JANEIRO-RJ",
+            "MG": "BELO HORIZONTE-MG",
+            "DF": "BRASILIA-DF",
         }
-        headers = {"User-Agent": "BakofFreteAPI/1.0"}
-        resp = requests.get(url, params=params, headers=headers, timeout=8)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and len(data) > 0:
-                lat = float(data[0]["lat"])
-                lon = float(data[0]["lon"])
-                cache_coordenadas_municipio[chave] = (lat, lon)
-                time.sleep(1)  # Respeita rate limit
-                return (lat, lon)
-    except Exception as e:
-        print(f"[WARN] Erro Nominatim para {municipio}/{uf}: {e}")
+        return capitais.get(uf)
     
     return None
-
-def _coordenadas_conhecidas(municipio: str, uf: str) -> Optional[Tuple[float, float]]:
-    """Base de coordenadas de municípios conhecidos"""
-    coords = {
-        # Capitais
-        "PORTO ALEGRE-RS": (-30.0346, -51.2177),
-        "SAO PAULO-SP": (-23.5505, -46.6333),
-        "RIO DE JANEIRO-RJ": (-22.9068, -43.1729),
-        "BRASILIA-DF": (-15.8267, -47.9218),
-        "BELO HORIZONTE-MG": (-19.9167, -43.9345),
-        "CURITIBA-PR": (-25.4284, -49.2733),
-        "FORTALEZA-CE": (-3.7172, -38.5433),
-        "SALVADOR-BA": (-12.9714, -38.5014),
-        "RECIFE-PE": (-8.0476, -34.8770),
-        "MANAUS-AM": (-3.1190, -60.0217),
-        "FLORIANOPOLIS-SC": (-27.5954, -48.5480),
-        "GOIANIA-GO": (-16.6869, -49.2648),
-        "VITORIA-ES": (-20.3155, -40.3128),
-        "CAMPO GRANDE-MS": (-20.4697, -54.6201),
-        "CUIABA-MT": (-15.6014, -56.0979),
-        # Principais cidades RS
-        "FREDERICO WESTPHALEN-RS": (-27.3594, -53.3937),
-        "PASSO FUNDO-RS": (-28.2620, -52.4083),
-        "ERECHIM-RS": (-27.6336, -52.2736),
-        "CAXIAS DO SUL-RS": (-29.1634, -51.1797),
-        "SANTA MARIA-RS": (-29.6868, -53.8149),
-        "PELOTAS-RS": (-31.7654, -52.3376),
-        # SC
-        "CHAPECO-SC": (-27.0965, -52.6146),
-        "BLUMENAU-SC": (-26.9194, -49.0661),
-        "JOINVILLE-SC": (-26.3045, -48.8487),
-        # PR
-        "CASCAVEL-PR": (-24.9555, -53.4552),
-        "FOZ DO IGUACU-PR": (-25.5163, -54.5854),
-        "LONDRINA-PR": (-23.3045, -51.1696),
-        "MARINGA-PR": (-23.4205, -51.9333),
-        # SP
-        "CAMPINAS-SP": (-22.9099, -47.0626),
-        "RIBEIRAO PRETO-SP": (-21.1767, -47.8103),
-        "SANTOS-SP": (-23.9608, -46.3336),
-        "SOROCABA-SP": (-23.5015, -47.4526),
-    }
-    
-    chave = f"{municipio}-{uf}"
-    return coords.get(chave)
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calcula distância em KM entre dois pontos usando fórmula de Haversine"""
+    """Calcula distância em KM entre dois pontos"""
     R = 6371  # Raio da Terra em km
     
     lat1_rad = math.radians(lat1)
@@ -189,56 +193,52 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     
     return R * c
 
-def calcular_distancia_entre_municipios(cep_origem: str, cep_destino: str) -> Tuple[Optional[float], str, Dict[str, Any]]:
+def calcular_distancia_real(cep_origem: str, cep_destino: str) -> Tuple[Optional[float], str, Dict[str, Any]]:
     """
-    Calcula distância real entre municípios
+    Calcula distância real usando tabela local de coordenadas
     Retorna: (km, fonte, detalhes)
     """
     detalhes = {
         "cep_origem": cep_origem,
         "cep_destino": cep_destino,
         "municipio_origem": None,
-        "uf_origem": None,
         "municipio_destino": None,
-        "uf_destino": None,
     }
     
     # Busca municípios
     muni_origem = buscar_municipio_por_cep(cep_origem)
     muni_destino = buscar_municipio_por_cep(cep_destino)
     
+    detalhes["municipio_origem"] = muni_origem
+    detalhes["municipio_destino"] = muni_destino
+    
     if not muni_origem or not muni_destino:
-        return (None, "erro_municipio", detalhes)
-    
-    municipio_orig, uf_orig = muni_origem
-    municipio_dest, uf_dest = muni_destino
-    
-    detalhes["municipio_origem"] = municipio_orig
-    detalhes["uf_origem"] = uf_orig
-    detalhes["municipio_destino"] = municipio_dest
-    detalhes["uf_destino"] = uf_dest
+        return (None, "municipio_nao_encontrado", detalhes)
     
     # Verifica se é mesmo município
-    if municipio_orig == municipio_dest and uf_orig == uf_dest:
+    if muni_origem == muni_destino:
         return (10.0, "mesmo_municipio", detalhes)
     
-    # Busca coordenadas dos municípios
-    coord_origem = buscar_coordenadas_municipio(municipio_orig, uf_orig)
-    coord_destino = buscar_coordenadas_municipio(municipio_dest, uf_dest)
+    # Busca coordenadas
+    coord_origem = COORDENADAS_MUNICIPIOS.get(muni_origem)
+    coord_destino = COORDENADAS_MUNICIPIOS.get(muni_destino)
     
     if not coord_origem or not coord_destino:
-        return (None, "erro_coordenadas", detalhes)
+        return (None, "coordenadas_nao_encontradas", detalhes)
     
     # Calcula distância
     lat1, lon1 = coord_origem
     lat2, lon2 = coord_destino
     km = haversine(lat1, lon1, lat2, lon2)
     
-    # Arredonda para múltiplos de 5 (mais realista)
+    # Ajusta distância (rodovias são ~15% mais longas que linha reta)
+    km = km * 1.15
+    
+    # Arredonda para múltiplos de 5
     km = round(km / 5) * 5
     km = max(10.0, km)
     
-    return (km, "distancia_municipio", detalhes)
+    return (km, "distancia_calculada", detalhes)
 
 def uf_por_cep(cep8: str) -> Optional[str]:
     """Retorna UF baseado na faixa de CEP"""
@@ -382,7 +382,7 @@ def carregar_tudo() -> Dict[str, Any]:
         print(f"[OK] Planilha carregada: {len(catalogo)} produtos")
         return {"consts": consts, "catalogo": catalogo}
     except Exception as e:
-        print(f"[WARN] Não foi possível carregar planilha: {e}")
+        print(f"[WARN] Planilha não carregada: {e}")
         return {
             "consts": {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO},
             "catalogo": {}
@@ -460,11 +460,13 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
 def index():
     return {
         "api": "Bakof Frete",
-        "versao": "2.0",
+        "versao": "3.0 - Cálculo LOCAL",
+        "municipios_disponiveis": len(COORDENADAS_MUNICIPIOS),
         "endpoints": {
             "/health": "Status da API",
             "/frete": "Calcular frete",
-            "/teste-distancia": "Testar distância entre CEPs"
+            "/teste-distancia": "Testar distância entre CEPs",
+            "/municipios": "Listar municípios disponíveis"
         }
     }
 
@@ -475,7 +477,15 @@ def health():
         "cep_origem": CEP_ORIGEM,
         "valores": DATA["consts"],
         "itens_catalogo": len(DATA["catalogo"]),
-        "cache_coordenadas": len(cache_coordenadas_municipio),
+        "municipios_cadastrados": len(COORDENADAS_MUNICIPIOS),
+    }
+
+@app.route("/municipios")
+def listar_municipios():
+    """Lista todos os municípios disponíveis"""
+    return {
+        "total": len(COORDENADAS_MUNICIPIOS),
+        "municipios": sorted(list(COORDENADAS_MUNICIPIOS.keys()))
     }
 
 @app.route("/frete")
@@ -511,8 +521,8 @@ def frete():
     except:
         pass
 
-    # Calcula distância entre municípios
-    km, km_fonte, detalhes = calcular_distancia_entre_municipios(cep_origem_param, cep_destino)
+    # Calcula distância
+    km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
     
     if km is None:
         # Fallback por UF
@@ -557,72 +567,5 @@ def frete():
     # Monta resposta XML
     municipio_info = ""
     if detalhes.get("municipio_origem") and detalhes.get("municipio_destino"):
-        municipio_info = (f"municipio_origem='{detalhes['municipio_origem']}/{detalhes['uf_origem']}' "
-                         f"municipio_destino='{detalhes['municipio_destino']}/{detalhes['uf_destino']}' ")
-
-    debug_info = (f"<debug "
-                  f"cep_origem='{cep_origem_param}' "
-                  f"cep_destino='{cep_destino}' "
-                  f"{municipio_info}"
-                  f"km='{km:.1f}' "
-                  f"fonte_km='{km_fonte}' "
-                  f"valor_km='{valor_km}' "
-                  f"tam_caminhao='{tam_caminhao}' "
-                  f"total_itens='{len(itens)}'"
-                  f"/>")
-
-    xml = f"""<?xml version="1.0"?>
-<cotacao>
-  <resultado>
-    <codigo>BAKOF</codigo>
-    <transportadora>Bakof Log</transportadora>
-    <servico>Transporte</servico>
-    <transporte>TERRESTRE</transporte>
-    <valor>{total:.2f}</valor>
-    <km_distancia>{km:.1f}</km_distancia>
-    <prazo_min>4</prazo_min>
-    <prazo_max>7</prazo_max>
-    <entrega_domiciliar>1</entrega_domiciliar>
-    <detalhes>{"".join(itens_xml)}
-    </detalhes>
-    {debug_info}
-  </resultado>
-</cotacao>"""
-    
-    return Response(xml, mimetype="application/xml")
-
-@app.route("/teste-distancia")
-def teste_distancia():
-    """Endpoint para testar cálculo de distância entre CEPs"""
-    cep_origem = request.args.get("origem", CEP_ORIGEM)
-    cep_destino = request.args.get("destino", "")
-    
-    if not cep_destino:
-        return {"erro": "Informe o parâmetro 'destino'"}
-    
-    km, fonte, detalhes = calcular_distancia_entre_municipios(cep_origem, cep_destino)
-    
-    return {
-        "cep_origem": cep_origem,
-        "cep_destino": cep_destino,
-        "municipio_origem": detalhes.get("municipio_origem"),
-        "uf_origem": detalhes.get("uf_origem"),
-        "municipio_destino": detalhes.get("municipio_destino"),
-        "uf_destino": detalhes.get("uf_destino"),
-        "distancia_km": km,
-        "fonte_calculo": fonte,
-    }
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    print("=" * 60)
-    print("🚀 API de Frete Bakof - Iniciando")
-    print("=" * 60)
-    print(f"📍 CEP Origem: {CEP_ORIGEM}")
-    print(f"🔑 Token: {TOKEN_SECRETO}")
-    print(f"📊 Produtos no catálogo: {len(DATA['catalogo'])}")
-    print(f"💰 Valor por KM: R$ {DATA['consts']['VALOR_KM']:.2f}")
-    print(f"🚛 Tamanho caminhão: {DATA['consts']['TAM_CAMINHAO']:.1f}m")
-    print(f"🌐 Rodando em: http://localhost:{port}")
-    print("=" * 60)
-    app.run(host="0.0.0.0", port=port, debug=True)
+        municipio_info = (f"municipio_origem='{detalhes['municipio_origem']}' "
+                         f"municipio_destino
