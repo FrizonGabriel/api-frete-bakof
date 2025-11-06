@@ -403,7 +403,7 @@ def index():
         "municipios_disponiveis": len(COORDENADAS_MUNICIPIOS),
         "endpoints": {
             "/health": "Status da API",
-            "/frete": "Calcular frete",
+            "/frete": "Calcular frete (compatível Tray)",
             "/teste-distancia": "Testar distância entre CEPs",
             "/municipios": "Listar municípios disponíveis"
         }
@@ -440,12 +440,12 @@ def frete():
     if token != TOKEN_SECRETO:
         return Response("Token inválido", status=403)
 
-    # Parâmetros obrigatórios
+    # Parâmetros (compatíveis com Tray)
     cep_origem_param = request.args.get("cep_origem", CEP_ORIGEM)
-    cep_destino = request.args.get("cep_destino", "")
+    cep_destino = request.args.get("cep_destino") or request.args.get("cep") or ""
     prods = request.args.get("prods", "")
     if not cep_destino or not prods:
-        return Response("Parâmetros insuficientes (cep_destino, prods)", status=400)
+        return Response("Parâmetros insuficientes (cep/cep_destino, prods)", status=400)
 
     # Parse produtos
     itens = parse_prods(prods)
@@ -478,7 +478,6 @@ def frete():
 
     # Cálculo por item
     total = 0.0
-    itens_xml = []
     for it in itens:
         nome = it["codigo"] or "Item"
         tam_catalogo = DATA["catalogo"].get(nome)
@@ -489,52 +488,21 @@ def frete():
         v_unit = calcula_valor_item(tam_catalogo, km, valor_km, tam_caminhao)
         v_tot = v_unit * max(1, it["qty"])
         total += v_tot
-        itens_xml.append(f"""
-      <item>
-        <codigo>{nome}</codigo>
-        <quantidade>{it['qty']}</quantidade>
-        <diametro_metros>{tam_catalogo:.3f}</diametro_metros>
-        <valor_unitario>{v_unit:.2f}</valor_unitario>
-        <valor_total>{v_tot:.2f}</valor_total>
-      </item>""")
 
-    # XML de resposta
-    municipio_info = ""
-    if detalhes.get("municipio_origem") and detalhes.get("municipio_destino"):
-        municipio_info = (
-            f"municipio_origem='{detalhes['municipio_origem']}' "
-            f"municipio_destino='{detalhes['municipio_destino']}' "
-        )
+    # Prazo (um único campo, como a Tray costuma esperar)
+    prazo = 7  # use uma regra se quiser dinamizar
 
-    debug_info = (
-        f"<debug "
-        f"cep_origem='{cep_origem_param}' "
-        f"cep_destino='{cep_destino}' "
-        f"{municipio_info}"
-        f"km='{km:.1f}' "
-        f"fonte_km='{km_fonte}' "
-        f"valor_km='{valor_km}' "
-        f"tam_caminhao='{tam_caminhao}' "
-        f"total_itens='{len(itens)}'"
-        f"/>"
-    )
-
-    xml = f"""<?xml version="1.0"?>
-<cotacao>
-  <resultado>
+    # XML no schema da Tray
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<frete>
+  <servico>
     <codigo>BAKOF</codigo>
-    <transportadora>Bakof Log</transportadora>
-    <servico>Transporte</servico>
-    <transporte>TERRESTRE</transporte>
+    <nome>Bakof Log</nome>
     <valor>{total:.2f}</valor>
-    <km_distancia>{km:.1f}</km_distancia>
-    <prazo_min>4</prazo_min>
-    <prazo_max>7</prazo_max>
-    <entrega_domiciliar>1</entrega_domiciliar>
-    <detalhes>{"".join(itens_xml)}
-    </detalhes>
-    {debug_info}
-  </resultado>
-</cotacao>"""
+    <prazo>{prazo}</prazo>
+  </servico>
+</frete>
+"""
 
-    return Response(xml, mimetype="application/xml")
+    # A Tray é sensível ao content-type:
+    return Response(xml, mimetype="text/xml; charset=utf-8")
