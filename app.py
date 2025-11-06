@@ -1,160 +1,286 @@
-# app.py — API de Frete (Tray) com FAIXAS de KM (100 em 100 km)
-import os
-import math
-import re
+# app.py — FRETE por Município (prioridade) + Faixa CEP + UF + FAIXAS DE KM (Tray)
+import os, math, re
 from typing import Dict, Any, List, Tuple, Optional
 import pandas as pd
 from flask import Flask, request, Response, jsonify
 
-# ==========================
-# CONFIGURAÇÕES
-# ==========================
-TOKEN_SECRETO = os.getenv("TOKEN_SECRETO", "teste123")
-CEP_ORIGEM = os.getenv("CEP_ORIGEM", "98400000")
-ARQ_PLANILHA = os.getenv("PLANILHA_FRETE", "tabela de frete atualizada(2)(Recuperado Automaticamente).xlsx")
+# (Opcional) permitir .env local em dev
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
-DEFAULT_VALOR_KM = float(os.getenv("DEFAULT_VALOR_KM", "7.0"))
+# ==========================
+# CONFIG
+# ==========================
+TOKEN_SECRETO  = os.getenv("TOKEN_SECRETO", "teste123")
+ARQ_PLANILHA   = os.getenv("PLANILHA_FRETE", "tabela de frete atualizada(2)(Recuperado Automaticamente).xlsx")
+
+DEFAULT_VALOR_KM     = float(os.getenv("DEFAULT_VALOR_KM", "7.0"))
 DEFAULT_TAM_CAMINHAO = float(os.getenv("DEFAULT_TAM_CAMINHAO", "8.5"))
-DEFAULT_KM = float(os.getenv("DEFAULT_KM", "450.0"))
-MIN_FRETE = float(os.getenv("MIN_FRETE", "120.0"))
+DEFAULT_KM           = float(os.getenv("DEFAULT_KM", "450.0"))
+MIN_FRETE            = float(os.getenv("MIN_FRETE", "120.0"))
 
-# NOVO: controle de faixas
-FAIXA_KM_LARGURA = int(os.getenv("FAIXA_KM_LARGURA", "100"))  # tamanho da faixa (padrão 100 km)
-MODO_FAIXA = os.getenv("MODO_FAIXA", "arredondar").lower()    # "arredondar" | "tabela"
-# Exemplo: "0-100:180;101-200:260;201-300:350"
-TABELA_FAIXAS = os.getenv("TABELA_FAIXAS", "").strip()
+# NOVO: configuração de faixas
+FAIXA_KM_LARGURA = int(os.getenv("FAIXA_KM_LARGURA", "100"))  # 100 em 100 km
+MODO_FAIXA       = os.getenv("MODO_FAIXA", "arredondar").strip().lower()  # "arredondar" | "tabela"
+# Ex.: 0-100:180;101-200:260;201-300:350
+TABELA_FAIXAS    = os.getenv("TABELA_FAIXAS", "").strip()
 
 PALAVRAS_IGNORAR = {
-    "VALOR KM", "TAMANHO CAMINHAO", "TAMANHO CAMINHÃO",
-    "CALCULO DE FRETE POR TAMANHO DE PEÇA", "CÁLCULO DE FRETE POR TAMANHO DE PEÇA"
+    "VALOR KM","TAMANHO CAMINHAO","TAMANHO CAMINHÃO",
+    "CALCULO DE FRETE POR TAMANHO DE PEÇA","CÁLCULO DE FRETE POR TAMANHO DE PEÇA"
 }
+
+# Estimativa por UF (último fallback)
+KM_APROX_POR_UF = {
+    "RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,
+    "MS":1600,"MT":2200,"DF":2000,"GO":2100,"TO":2500,"BA":2600,"SE":2700,
+    "AL":2800,"PE":3000,"PB":3100,"RN":3200,"CE":3400,"PI":3300,"MA":3500,
+    "PA":3800,"AP":4100,"AM":4200,"RO":4000,"AC":4300,"RR":4500,
+}
+
+UF_CEP_RANGES = [
+    ("SP","01000000","19999999"),("RJ","20000000","28999999"),
+    ("ES","29000000","29999999"),("MG","30000000","39999999"),
+    ("BA","40000000","48999999"),("SE","49000000","49999999"),
+    ("PE","50000000","56999999"),("AL","57000000","57999999"),
+    ("PB","58000000","58999999"),("RN","59000000","59999999"),
+    ("CE","60000000","63999999"),("PI","64000000","64999999"),
+    ("MA","65000000","65999999"),("PA","66000000","68899999"),
+    ("AP","68900000","68999999"),("AM","69000000","69899999"),
+    ("RR","69300000","69399999"),("AC","69900000","69999999"),
+    ("DF","70000000","73699999"),("GO","72800000","76799999"),
+    ("TO","77000000","77999999"),("MT","78000000","78899999"),
+    ("MS","79000000","79999999"),("PR","80000000","87999999"),
+    ("SC","88000000","89999999"),("RS","90000000","99999999"),
+]
 
 app = Flask(__name__)
 
 # ==========================
-# TABELA DE COORDENADAS (trecho reduzido para exemplo)
+# HELPERS
 # ==========================
-COORDENADAS_MUNICIPIOS = {
-    "FREDERICO WESTPHALEN-RS": (-27.3594, -53.3937),
-    "PORTO ALEGRE-RS": (-30.0346, -51.2177),
-    "CAXIAS DO SUL-RS": (-29.1634, -51.1797),
-    "PELOTAS-RS": (-31.7654, -52.3376),
-    "CANOAS-RS": (-29.9177, -51.1844),
-    "SANTA MARIA-RS": (-29.6868, -53.8149),
-    "PASSO FUNDO-RS": (-28.2620, -52.4083),
-    "ERECHIM-RS": (-27.6336, -52.2736),
-    "FLORIANOPOLIS-SC": (-27.5954, -48.5480),
-    "JOINVILLE-SC": (-26.3045, -48.8487),
-    "BLUMENAU-SC": (-26.9194, -49.0661),
-    "CHAPECO-SC": (-27.0965, -52.6146),
-    "CURITIBA-PR": (-25.4284, -49.2733),
-    "LONDRINA-PR": (-23.3045, -51.1696),
-    "MARINGA-PR": (-23.4205, -51.9333),
-    "CASCAVEL-PR": (-24.9555, -53.4552),
-    "FOZ DO IGUACU-PR": (-25.5163, -54.5854),
-    "SAO PAULO-SP": (-23.5505, -46.6333),
-    "GUARULHOS-SP": (-23.4538, -46.5333),
-    "CAMPINAS-SP": (-22.9099, -47.0626),
-    "SAO BERNARDO DO CAMPO-SP": (-23.6914, -46.5647),
-    "SANTOS-SP": (-23.9608, -46.3336),
-    "SAO JOSE DOS CAMPOS-SP": (-23.1791, -45.8872),
-    "RIBEIRAO PRETO-SP": (-21.1767, -47.8103),
-    "RIO DE JANEIRO-RJ": (-22.9068, -43.1729),
-    "NITEROI-RJ": (-22.8839, -43.1039),
-    "BELO HORIZONTE-MG": (-19.9167, -43.9345),
-    "CONTAGEM-MG": (-19.9320, -44.0539),
-    "BRASILIA-DF": (-15.8267, -47.9218),
-}
+def limpar_texto(nome: Any) -> str:
+    if not isinstance(nome, str): return ""
+    return " ".join(nome.replace("\n"," ").split()).strip()
 
-FAIXAS_CEP_MUNICIPIO = [
-    ("98400000", "98419999", "FREDERICO WESTPHALEN-RS"),
-    ("90000000", "91999999", "PORTO ALEGRE-RS"),
-    ("95000000", "95130999", "CAXIAS DO SUL-RS"),
-    ("96000000", "96099999", "PELOTAS-RS"),
-    ("92000000", "92999999", "CANOAS-RS"),
-    ("97000000", "97119999", "SANTA MARIA-RS"),
-    ("99000000", "99099999", "PASSO FUNDO-RS"),
-    ("99700000", "99799999", "ERECHIM-RS"),
-    ("88000000", "88099999", "FLORIANOPOLIS-SC"),
-    ("89200000", "89239999", "JOINVILLE-SC"),
-    ("89000000", "89099999", "BLUMENAU-SC"),
-    ("89800000", "89879999", "CHAPECO-SC"),
-    ("80000000", "82999999", "CURITIBA-PR"),
-    ("86000000", "86199999", "LONDRINA-PR"),
-    ("87000000", "87099999", "MARINGA-PR"),
-    ("85800000", "85879999", "CASCAVEL-PR"),
-    ("85850000", "85869999", "FOZ DO IGUACU-PR"),
-    ("01000000", "05999999", "SAO PAULO-SP"),
-    ("07000000", "07399999", "GUARULHOS-SP"),
-    ("13000000", "13149999", "CAMPINAS-SP"),
-    ("09700000", "09899999", "SAO BERNARDO DO CAMPO-SP"),
-    ("11000000", "11999999", "SANTOS-SP"),
-    ("12200000", "12249999", "SAO JOSE DOS CAMPOS-SP"),
-    ("14000000", "14109999", "RIBEIRAO PRETO-SP"),
-    ("20000000", "23799999", "RIO DE JANEIRO-RJ"),
-    ("24000000", "24999999", "NITEROI-RJ"),
-    ("30000000", "31999999", "BELO HORIZONTE-MG"),
-    ("32000000", "32999999", "CONTAGEM-MG"),
-    ("70000000", "72799999", "BRASILIA-DF"),
-]
-
-# ==========================
-# UTILS
-# ==========================
-def limpar_cep(cep: str) -> str:
-    s = re.sub(r'\D', '', str(cep or ""))
-    return s[:8].zfill(8) if s else "00000000"
+def so_digitos(cep: Any) -> str:
+    s = re.sub(r"\D","", str(cep or ""))
+    return s[:8] if len(s) >= 8 else s.zfill(8)
 
 def uf_por_cep(cep8: str) -> Optional[str]:
-    UF_CEP_RANGES = [
-        ("SP","01000000","19999999"),("RJ","20000000","28999999"),
-        ("ES","29000000","29999999"),("MG","30000000","39999999"),
-        ("BA","40000000","48999999"),("SE","49000000","49999999"),
-        ("PE","50000000","56999999"),("AL","57000000","57999999"),
-        ("PB","58000000","58999999"),("RN","59000000","59999999"),
-        ("CE","60000000","63999999"),("PI","64000000","64999999"),
-        ("MA","65000000","65999999"),("PA","66000000","68899999"),
-        ("AP","68900000","68999999"),("AM","69000000","69899999"),
-        ("RR","69300000","69399999"),("AC","69900000","69999999"),
-        ("DF","70000000","73699999"),("GO","72800000","76799999"),
-        ("TO","77000000","77999999"),("MT","78000000","78899999"),
-        ("MS","79000000","79999999"),("PR","80000000","87999999"),
-        ("SC","88000000","89999999"),("RS","90000000","99999999"),
-    ]
-    try:
-        n = int(cep8)
-    except:
-        return None
+    try: n = int(cep8)
+    except: return None
     for uf, a, b in UF_CEP_RANGES:
-        if int(a) <= n <= int(b):
-            return uf
+        if int(a) <= n <= int(b): return uf
     return None
 
-def buscar_municipio_por_cep(cep: str) -> Optional[str]:
-    cep_limpo = limpar_cep(cep)
-    cep_num = int(cep_limpo)
-    for inicio, fim, municipio in FAIXAS_CEP_MUNICIPIO:
-        if int(inicio) <= cep_num <= int(fim):
-            return municipio
-    uf = uf_por_cep(cep_limpo)
-    if uf:
-        capitais = {
-            "RS": "PORTO ALEGRE-RS","SC": "FLORIANOPOLIS-SC","PR": "CURITIBA-PR",
-            "SP": "SAO PAULO-SP","RJ": "RIO DE JANEIRO-RJ","MG": "BELO HORIZONTE-MG",
-            "DF": "BRASILIA-DF",
-        }
-        return capitais.get(uf)
+def extrai_numero_linha(row) -> Optional[float]:
+    for v in row:
+        if v is None or pd.isna(v): continue
+        s = str(v).strip().upper()
+        if s in ("", "NAN", "NONE", "NULL"): continue
+        s = s.replace(",", ".")
+        s = re.sub(r'(METROS?|KM|R\$|REAIS|/KM)', '', s, flags=re.IGNORECASE).strip()
+        try:
+            f = float(s)
+            if math.isfinite(f) and f > 0: return f
+        except: pass
     return None
 
-def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
+# ==========================
+# PLANILHA
+# ==========================
+def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
+    valor_km = DEFAULT_VALOR_KM
+    tam_caminhao = DEFAULT_TAM_CAMINHAO
+    for aba in ("BASE_CALCULO","D","BASE","CONSTANTES"):
+        if aba not in xls.sheet_names: continue
+        try:
+            raw = pd.read_excel(xls, aba, header=None)
+            for _, row in raw.iterrows():
+                texto = " ".join([str(v).upper() for v in row if isinstance(v, str)])
+                if "VALOR" in texto or "KM" in texto:
+                    num = extrai_numero_linha(row)
+                    if num and 3 <= num <= 50: valor_km = num
+                if "TAMANHO" in texto and "CAMINH" in texto:
+                    num = extrai_numero_linha(row)
+                    if num and 3 <= num <= 20: tam_caminhao = num
+        except: pass
+    return {"VALOR_KM": valor_km, "TAM_CAMINHAO": tam_caminhao}
+
+def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
+    for aba in ("CADASTRO_PRODUTO","CADASTRO","PRODUTOS"):
+        if aba not in xls.sheet_names: continue
+        try:
+            raw = pd.read_excel(xls, aba, header=None)
+            nome_col = 2 if raw.shape[1] > 2 else 0
+            dim1_col = 3 if raw.shape[1] > 3 else (1 if raw.shape[1] > 1 else 0)
+            dim2_col = 4 if raw.shape[1] > 4 else (2 if raw.shape[1] > 2 else 1)
+            df = raw[[nome_col, dim1_col, dim2_col]].copy()
+            df.columns = ["nome","dim1","dim2"]
+            df["nome"] = df["nome"].apply(limpar_texto)
+            df = df[~df["nome"].str.upper().isin(PALAVRAS_IGNORAR)]
+            df = df[df["nome"].astype(str).str.len() > 0]
+            df["dim1"] = pd.to_numeric(df["dim1"], errors="coerce").fillna(0.0)
+            df["dim2"] = pd.to_numeric(df["dim2"], errors="coerce").fillna(0.0)
+            df = df.drop_duplicates(subset=["nome"], keep="first").reset_index(drop=True)
+            return df[["nome","dim1","dim2"]]
+        except: pass
+    return pd.DataFrame(columns=["nome","dim1","dim2"])
+
+def tipo_produto(nome: str) -> str:
+    n = (nome or "").lower()
+    if "fossa" in n: return "fossa"
+    if "vertical" in n: return "vertical"
+    if "horizontal" in n: return "horizontal"
+    if "tc" in n and ("10.000" in n or "10000" in n or "10.0" in n): return "tc_ate_10k"
+    return "auto"
+
+def tamanho_peca_por_nome(nome: str, dim1: float, dim2: float) -> float:
+    t = tipo_produto(nome)
+    if t in ("fossa","vertical"):  return float(dim1 or 0.0)
+    if t in ("horizontal","tc_ate_10k"): return float(dim2 or 0.0)
+    return float(max(float(dim1 or 0.0), float(dim2 or 0.0)))
+
+def montar_catalogo_tamanho(df: pd.DataFrame) -> Dict[str, float]:
+    mapa: Dict[str,float] = {}
+    for _, r in df.iterrows():
+        try:
+            nome = limpar_texto(r["nome"])
+            if not nome or nome.upper() in PALAVRAS_IGNORAR: continue
+            tam = tamanho_peca_por_nome(nome, float(r["dim1"]), float(r["dim2"]))
+            if tam > 0: mapa[nome] = tam
+        except: pass
+    return mapa
+
+# --------- Faixas CEP -> KM ----------
+def coletar_faixas_cep_km(xls: pd.ExcelFile) -> List[Tuple[str,str,float]]:
+    faixas: List[Tuple[str,str,float]] = []
+
+    def extrai_cep_limpo(v) -> Optional[str]:
+        if pd.isna(v): return None
+        s = re.sub(r'[.\-\s]', '', str(v).strip())
+        if len(s) == 8 and s.isdigit(): return s
+        return None
+
+    def extrai_km_val(v) -> Optional[float]:
+        if pd.isna(v): return None
+        m = re.search(r'[-+]?\d[\d\.\,]*', str(v))
+        if not m: return None
+        num = m.group(0).replace('.','').replace(',','.')
+        try:
+            f = float(num)
+            if 10 <= f <= 5000: return f
+        except: pass
+        return None
+
+    abas = ["D"] + [s for s in xls.sheet_names if s != "D"]
+    for aba in abas:
+        try:
+            df = pd.read_excel(xls, aba, dtype=str, header=None)
+            if df.empty: continue
+            for i in range(len(df.columns) - 2):
+                col_ini, col_fim, col_km = df.iloc[:, i], df.iloc[:, i+1], df.iloc[:, i+2]
+                ok = False
+                for idx in range(len(df)):
+                    a = extrai_cep_limpo(col_ini.iloc[idx])
+                    b = extrai_cep_limpo(col_fim.iloc[idx])
+                    k = extrai_km_val(col_km.iloc[idx])
+                    if a and b and k:
+                        faixas.append((a, b, k)); ok = True
+                if ok: break
+            if len(faixas) > 10: break
+        except: pass
+
+    uniq = {}
+    for a,b,k in faixas: uniq[(a,b)] = k
+    out = [(a,b,k) for (a,b),k in uniq.items()]
+    out.sort(key=lambda x:(x[0],x[1]))
+    return out
+
+def km_por_cep(faixas: List[Tuple[str,str,float]], cep_dest: str) -> Tuple[float, str]:
+    d = so_digitos(cep_dest)
+    if len(d) != 8: return DEFAULT_KM, "default"
+    if faixas:
+        n = int(d)
+        for a,b,k in faixas:
+            if int(a) <= n <= int(b): return float(k), "faixa"
+    uf = uf_por_cep(d)
+    if uf and uf in KM_APROX_POR_UF: return float(KM_APROX_POR_UF[uf]), "uf_fallback"
+    return DEFAULT_KM, "default"
+
+# --------- REGRAS POR MUNICÍPIO ----------
+ALIASES_MUNI = {
+    "uf": {"uf","estado"}, "municipio": {"municipio","município","cidade"},
+    "cep_ini": {"cep_ini","inicio","início","de","start"},
+    "cep_fim": {"cep_fim","final","ate","até","to","end"},
+    "km": {"km","dist","distancia","distância"},
+    "valor_km": {"valor_km","valor km","vl_km"},
+    "tam_caminhao": {"tamanho_caminhao","tam_caminhao","tam caminhao","tam caminhão"},
+    "fator_mult": {"fator_mult","fator","multiplicador"},
+    "pedagio": {"pedagio","pedágio"},
+    "acrescimo_pct": {"acrescimo_pct","acréscimo_pct","acrescimo","acréscimo","percentual"},
+    "min_frete": {"min_frete","mínimo","frete_min","valor_minimo"},
+}
+def _match_col(header: List[str], targets: set[str]) -> Optional[int]:
+    for i, c in enumerate(header):
+        n = limpar_texto(str(c)).lower()
+        if any(t in n for t in targets): return i
+    return None
+
+def carregar_regras_municipio(xls: pd.ExcelFile) -> List[Dict[str, Any]]:
+    """Aba REGRAS_MUNICIPIO (prioridade máxima)."""
+    if "REGRAS_MUNICIPIO" not in xls.sheet_names: return []
+    df = pd.read_excel(xls, "REGRAS_MUNICIPIO", header=0, dtype=str).fillna("")
+    if df.empty: return []
+    header = [str(x) for x in df.columns]
+    idx = {k:_match_col(header, v) for k,v in ALIASES_MUNI.items()}
+    regras = []
+    for row in df.itertuples(index=False):
+        vals = list(row)
+        def get(col):
+            j = idx[col]
+            return (vals[j] if j is not None else "").strip()
+        def get_num(col):
+            s = get(col)
+            m = re.search(r'[-+]?\d[\d\.\,]*', s)
+            if not m: return None
+            num = m.group(0).replace('.','').replace(',','.')
+            try:
+                f = float(num);  return f if math.isfinite(f) else None
+            except: return None
+        cep_ini = so_digitos(get("cep_ini")); cep_fim = so_digitos(get("cep_fim"))
+        if len(cep_ini)!=8 or len(cep_fim)!=8: continue
+        regras.append({
+            "uf": limpar_texto(get("uf")).upper(),
+            "municipio": limpar_texto(get("municipio")).upper(),
+            "cep_ini": cep_ini, "cep_fim": cep_fim,
+            "km": get_num("km"),
+            "valor_km": get_num("valor_km"),
+            "tam_caminhao": get_num("tam_caminhao"),
+            "fator_mult": get_num("fator_mult"),
+            "pedagio": get_num("pedagio"),
+            "acrescimo_pct": get_num("acrescimo_pct"),
+            "min_frete": get_num("min_frete"),
+        })
+    regras.sort(key=lambda r: (r["cep_ini"], r["cep_fim"]))
+    return regras
+
+def buscar_regra_municipio(regras_muni: List[Dict[str, Any]], cep_dest: str) -> Optional[Dict[str, Any]]:
+    d = so_digitos(cep_dest)
+    if len(d)!=8: return None
+    n = int(d)
+    for r in regras_muni:
+        if int(r["cep_ini"]) <= n <= int(r["cep_fim"]): return r
+    return None
+
+# --------- FALLBACK MUNICIPAL embutido ----------
+FALLBACK_MUNICIPIOS = [
+    {"uf":"RS","municipio":"FREDERICO WESTPHALEN","cep_ini":"98400000","cep_fim":"98419999","km": 10},
+]
 
 # ==========================
 # FAIXAS DE KM (NOVO)
@@ -184,16 +310,14 @@ def parse_tabela_faixas(cfg: str) -> List[Tuple[int,int,float]]:
             preco = float(str(preco).replace(",", ".").strip())
             if a >= 0 and b >= a and preco >= 0:
                 out.append((a, b, preco))
-        except:  # silencioso
+        except:
             continue
     return sorted(out, key=lambda x: (x[0], x[1]))
 
 TABELA_FAIXAS_PARS = parse_tabela_faixas(TABELA_FAIXAS)
 
 def preco_por_tabela_faixas(km: float) -> Optional[Tuple[float, Tuple[int,int]]]:
-    """
-    Se MODO_FAIXA="tabela" e a faixa existir em TABELA_FAIXAS, retorna (preco, (ini,fim)).
-    """
+    """Se MODO_FAIXA='tabela' e houver faixa, retorna (preco, (ini,fim))."""
     if MODO_FAIXA != "tabela" or not TABELA_FAIXAS_PARS:
         return None
     k = int(math.ceil(km))
@@ -203,108 +327,39 @@ def preco_por_tabela_faixas(km: float) -> Optional[Tuple[float, Tuple[int,int]]]
     return None
 
 # ==========================
-# PLANILHA (igual à versão anterior, reduzida)
+# CARREGAMENTO
 # ==========================
-def limpar_texto(nome: Any) -> str:
-    if not isinstance(nome, str): return ""
-    return " ".join(nome.replace("\n"," ").split()).strip()
-
-def carregar_constantes(xls: pd.ExcelFile) -> Dict[str, float]:
-    valor_km = DEFAULT_VALOR_KM
-    tam_caminhao = DEFAULT_TAM_CAMINHAO
-    for aba in ("BASE_CALCULO", "D", "BASE", "CONSTANTES"):
-        if aba not in xls.sheet_names: continue
-        try:
-            raw = pd.read_excel(xls, aba, header=None)
-            for _, row in raw.iterrows():
-                texto = " ".join([str(v).upper() for v in row if isinstance(v, str)])
-                if "VALOR" in texto or "KM" in texto:
-                    # pega primeiro número que pareça "valor por km"
-                    for v in row:
-                        try:
-                            f = float(str(v).replace(",", "."))
-                            if 3 <= f <= 50: valor_km = f
-                        except: pass
-                if "TAMANHO" in texto and "CAMINH" in texto:
-                    for v in row:
-                        try:
-                            f = float(str(v).replace(",", "."))
-                            if 3 <= f <= 20: tam_caminhao = f
-                        except: pass
-        except Exception as e:
-            print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    return {"VALOR_KM": valor_km, "TAM_CAMINHAO": tam_caminhao}
-
-def carregar_cadastro_produtos(xls: pd.ExcelFile) -> pd.DataFrame:
-    for aba in ("CADASTRO_PRODUTO", "CADASTRO", "PRODUTOS"):
-        if aba not in xls.sheet_names: continue
-        try:
-            raw = pd.read_excel(xls, aba, header=None)
-            nome_col = 2 if raw.shape[1] > 2 else 0
-            dim1_col = 3 if raw.shape[1] > 3 else (1 if raw.shape[1] > 1 else 0)
-            dim2_col = 4 if raw.shape[1] > 4 else (2 if raw.shape[1] > 2 else 1)
-            df = raw[[nome_col, dim1_col, dim2_col]].copy()
-            df.columns = ["nome", "dim1", "dim2"]
-            df["nome"] = df["nome"].apply(limpar_texto)
-            df = df[df["nome"].astype(str).str.len() > 0].drop_duplicates(subset=["nome"])
-            df["dim1"] = pd.to_numeric(df["dim1"], errors="coerce").fillna(0.0)
-            df["dim2"] = pd.to_numeric(df["dim2"], errors="coerce").fillna(0.0)
-            return df[["nome", "dim1", "dim2"]]
-        except Exception as e:
-            print(f"[WARN] Erro ao ler aba {aba}: {e}")
-    return pd.DataFrame(columns=["nome", "dim1", "dim2"])
-
-def tipo_produto(nome: str) -> str:
-    n = (nome or "").lower()
-    if "fossa" in n: return "fossa"
-    if "vertical" in n: return "vertical"
-    if "horizontal" in n: return "horizontal"
-    if "tc" in n and ("10.000" in n or "10000" in n or "10.0" in n): return "tc_ate_10k"
-    return "auto"
-
-def tamanho_peca_por_nome(nome: str, dim1: float, dim2: float) -> float:
-    t = tipo_produto(nome)
-    if t in ("fossa", "vertical"):  return float(dim1 or 0.0)
-    if t in ("horizontal", "tc_ate_10k"): return float(dim2 or 0.0)
-    return float(max(float(dim1 or 0.0), float(dim2 or 0.0)))
-
-def montar_catalogo_tamanho(df: pd.DataFrame) -> Dict[str, float]:
-    mapa: Dict[str, float] = {}
-    for _, r in df.iterrows():
-        try:
-            nome = limpar_texto(r["nome"])
-            tam = tamanho_peca_por_nome(nome, float(r["dim1"]), float(r["dim2"]))
-            if tam > 0: mapa[nome] = tam
-        except: pass
-    return mapa
-
 def carregar_tudo() -> Dict[str, Any]:
     try:
         xls = pd.ExcelFile(ARQ_PLANILHA)
-        consts = carregar_constantes(xls)
-        cadastro = carregar_cadastro_produtos(xls)
-        catalogo = montar_catalogo_tamanho(cadastro)
-        print(f"[OK] Planilha carregada: {len(catalogo)} produtos")
-        return {"consts": consts, "catalogo": catalogo}
-    except Exception as e:
-        print(f"[WARN] Planilha não carregada: {e}")
-        return {"consts": {"VALOR_KM": DEFAULT_VALOR_KM, "TAM_CAMINHAO": DEFAULT_TAM_CAMINHAO}, "catalogo": {}}
+    except Exception:
+        return {"consts":{"VALOR_KM":DEFAULT_VALOR_KM,"TAM_CAMINHAO":DEFAULT_TAM_CAMINHAO},
+                "catalogo":{}, "faixas":[], "regras_municipio":FALLBACK_MUNICIPIOS}
+
+    consts     = carregar_constantes(xls)
+    cadastro   = carregar_cadastro_produtos(xls)
+    catalogo   = montar_catalogo_tamanho(cadastro)
+    faixas     = coletar_faixas_cep_km(xls)
+    regras_mun = carregar_regras_municipio(xls)
+    if not regras_mun:
+        regras_mun = FALLBACK_MUNICIPIOS
+    return {"consts": consts, "catalogo": catalogo, "faixas": faixas, "regras_municipio": regras_mun}
 
 DATA = carregar_tudo()
 
 # ==========================
-# CÁLCULO DE FRETE
+# LÓGICA DE CÁLCULO
 # ==========================
 def calcula_valor_item(tamanho_peca_m: float, km_ref: float, valor_km: float, tam_caminhao: float) -> float:
     if tamanho_peca_m <= 0 or tam_caminhao <= 0: return 0.0
-    ocupacao = float(tamanho_peca_m) / float(tam_caminhao)
-    return round(valor_km * km_ref * ocupacao, 2)
+    ocup = float(tamanho_peca_m) / float(tam_caminhao)
+    return round(float(valor_km) * float(km_ref) * ocup, 2)
 
 def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
     itens: List[Dict[str, Any]] = []
     if not prods_str: return itens
     blocos = []
-    for sep in ("/", "|"):
+    for sep in ("/","|"):
         if sep in prods_str:
             blocos = [b for b in prods_str.split(sep) if b.strip()]
             break
@@ -313,7 +368,7 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
     def norm_num(x):
         if x is None: return 0.0
         s = str(x).strip().lower()
-        if s in ("", "null", "none", "nan"): return 0.0
+        if s in ("","null","none","nan"): return 0.0
         s = s.replace(",", ".")
         try: return float(s)
         except: return 0.0
@@ -324,198 +379,215 @@ def parse_prods(prods_str: str) -> List[Dict[str, Any]]:
 
     for raw in blocos:
         try:
-            partes = raw.split(";")
-            if len(partes) < 8: continue
-            comp, larg, alt, cub, qty, peso, codigo, valor = partes[:8]
-            itens.append({
+            comp, larg, alt, cub, qty, peso, codigo, valor = raw.split(";")
+            item = {
                 "comp": cm_to_m(norm_num(comp)),
                 "larg": cm_to_m(norm_num(larg)),
-                "alt": cm_to_m(norm_num(alt)),
-                "cub": norm_num(cub),
-                "qty": int(norm_num(qty)) if norm_num(qty) > 0 else 1,
+                "alt":  cm_to_m(norm_num(alt)),
+                "cub":  norm_num(cub),
+                "qty":  int(norm_num(qty)) if norm_num(qty)>0 else 1,
                 "peso": norm_num(peso),
                 "codigo": (codigo or "").strip(),
                 "valor": norm_num(valor),
-            })
+            }
+            itens.append(item)
         except Exception as e:
             print(f"[WARN] Erro parse item: {raw} - {e}")
+            continue
     return itens
 
-def calcular_distancia_real(cep_origem: str, cep_destino: str) -> Tuple[Optional[float], str, Dict[str, Any]]:
-    detalhes = {"cep_origem": cep_origem, "cep_destino": cep_destino,
-                "municipio_origem": None, "municipio_destino": None}
-    muni_origem = buscar_municipio_por_cep(cep_origem)
-    muni_destino = buscar_municipio_por_cep(cep_destino)
-    detalhes["municipio_origem"] = muni_origem
-    detalhes["municipio_destino"] = muni_destino
-    if not muni_origem or not muni_destino:
-        return (None, "municipio_nao_encontrado", detalhes)
-    if muni_origem == muni_destino:
-        return (10.0, "mesmo_municipio", detalhes)
-    c1 = COORDENADAS_MUNICIPIOS.get(muni_origem)
-    c2 = COORDENADAS_MUNICIPIOS.get(muni_destino)
-    if not c1 or not c2:
-        return (None, "coordenadas_nao_encontradas", detalhes)
-    km = haversine(c1[0], c1[1], c2[0], c2[1]) * 1.15
-    km = round(km / 5) * 5
-    km = max(10.0, km)
-    return (km, "distancia_calculada", detalhes)
-
-def calcular_prazo(km: float) -> int:
-    if km <= 100: return 2
-    if km <= 250: return 3
-    if km <= 500: return 5
-    if km <= 900: return 7
-    if km <= 1400: return 10
+def calcular_prazo(km_ref: float) -> int:
+    if km_ref <= 100: return 2
+    if km_ref <= 250: return 3
+    if km_ref <= 500: return 5
+    if km_ref <= 900: return 7
+    if km_ref <= 1400: return 10
     return 15
-
-def money(v: float) -> str:
-    return f"{v:.2f}"
-
-def build_xml_ok(servico: str, codigo: str, valor: float, prazo: int, obs: str = "") -> str:
-    obs = (obs or "").replace("&", "e")
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<frete>
-  <servicos>
-    <servico>
-      <nome>{servico}</nome>
-      <codigo>{codigo}</codigo>
-      <valor>{money(valor)}</valor>
-      <prazo>{prazo}</prazo>
-      <erro>0</erro>
-      <msg_erro></msg_erro>
-      <obs>{obs}</obs>
-    </servico>
-  </servicos>
-</frete>"""
-
-def build_xml_erro(msg: str) -> str:
-    msg = (msg or "Erro").replace("&", "e")
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<frete>
-  <servicos>
-    <servico>
-      <nome>INDISPONIVEL</nome>
-      <codigo>000</codigo>
-      <valor>0.00</valor>
-      <prazo>0</prazo>
-      <erro>1</erro>
-      <msg_erro>{msg}</msg_erro>
-      <obs></obs>
-    </servico>
-  </servicos>
-</frete>"""
 
 # ==========================
 # ENDPOINTS
 # ==========================
+@app.route("/health")
+def health():
+    return {
+        "ok": True,
+        "valores": DATA["consts"],
+        "itens_catalogo": len(DATA["catalogo"]),
+        "faixas_cep_km": len(DATA["faixas"]),
+        "regras_municipio": len(DATA.get("regras_municipio", [])),
+        "faixa_km_largura": FAIXA_KM_LARGURA,
+        "modo_faixa": MODO_FAIXA,
+        "tem_tabela_faixas": bool(TABELA_FAIXAS_PARS),
+        "amostra_faixas": [{"ini": a, "fim": b, "km": k} for a,b,k in DATA["faixas"][:5]],
+    }
+
+@app.route("/frete")
+def frete():
+    token = request.args.get("token","")
+    if token != TOKEN_SECRETO:
+        return Response("Token inválido", status=403, mimetype="text/plain; charset=utf-8")
+
+    cep_dest = request.args.get("cep_destino","") or request.args.get("cep","")
+    prods    = request.args.get("prods","")
+    km_param = request.args.get("km","")
+    retornar_json = (request.args.get("retorna","").lower() == "json")
+
+    if not cep_dest:
+        return Response("CEP destino não informado", status=400, mimetype="text/plain; charset=utf-8")
+    if not prods and MODO_FAIXA != "tabela":
+        return Response("Produtos não informados", status=400, mimetype="text/plain; charset=utf-8")
+
+    itens = parse_prods(prods) if prods else []
+    if not itens and MODO_FAIXA != "tabela":
+        return Response("Nenhum item válido em 'prods'", status=400, mimetype="text/plain; charset=utf-8")
+
+    valor_km     = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
+    tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
+
+    # overrides para teste
+    try:
+        if request.args.get("valor_km"):     valor_km = float(str(request.args["valor_km"]).replace(",", "."))
+        if request.args.get("tam_caminhao"): tam_caminhao = float(str(request.args["tam_caminhao"]).replace(",", "."))
+    except: pass
+
+    # KM base (fonte + prioridade)
+    km = None
+    km_fonte = "default"
+    regra = None
+
+    # 0) parametro direto
+    if km_param:
+        try:
+            km = max(1.0, float(str(km_param).replace(",", ".")))
+            km_fonte = "param"
+        except:
+            km = None
+
+    # 1) regra municipal (planilha OU fallback embutido)
+    if km is None:
+        regra = buscar_regra_municipio(DATA.get("regras_municipio", []), cep_dest)
+        if regra and regra.get("km"):
+            km, km_fonte = float(regra["km"]), "municipio"
+            if regra.get("valor_km"):     valor_km = float(regra["valor_km"])
+            if regra.get("tam_caminhao"): tam_caminhao = float(regra["tam_caminhao"])
+
+    # 2) faixa de CEP (da planilha)
+    if km is None:
+        km, km_fonte = km_por_cep(DATA.get("faixas", []), cep_dest)
+
+    # --- FAIXA DE KM aplicada ---
+    km_faixa_topo, faixa_ini, faixa_fim = arredonda_para_faixa_km(km, FAIXA_KM_LARGURA)
+
+    # MODO "tabela": preço fechado por faixa
+    tabela_hit = preco_por_tabela_faixas(km)
+    if tabela_hit:
+        preco_faixa, (fa_ini, fa_fim) = tabela_hit
+        total = max(MIN_FRETE, float(preco_faixa))
+        prazo = calcular_prazo(km_faixa_topo)
+        obs = f"modo=tabela; faixa={fa_ini}-{fa_fim}km; km_real={km} (fonte={km_fonte})"
+        if retornar_json:
+            return jsonify({
+                "ok": True, "valor": total, "prazo": prazo,
+                "km_real": km, "km_faixa_topo": km_faixa_topo, "faixa": [fa_ini, fa_fim],
+                "fonte_km": km_fonte
+            })
+        xml = f"""<?xml version="1.0"?>
+<cotacao>
+  <resultado>
+    <codigo>BAKOF</codigo>
+    <transportadora>Bakof Log</transportadora>
+    <servico>Transporte</servico>
+    <transporte>TERRESTRE</transporte>
+    <valor>{total:.2f}</valor>
+    <prazo_min>4</prazo_min>
+    <prazo_max>{prazo}</prazo_max>
+    <entrega_domiciliar>1</entrega_domiciliar>
+    <detalhes></detalhes>
+    <debug km="{km:.1f}" fonte_km="{km_fonte}" modo="tabela" faixa="{fa_ini}-{fa_fim}" km_faixa="{km_faixa_topo}"/>
+  </resultado>
+</cotacao>"""
+        return Response(xml, mimetype="application/xml")
+
+    # MODO "arredondar": usa km_faixa_topo na fórmula por item
+    total = 0.0
+    itens_xml = []
+    for it in itens:
+        nome = it.get("codigo") or "Item"
+        tam_catalogo = None
+        if DATA["catalogo"]:
+            tam_catalogo = DATA["catalogo"].get(nome)
+        if tam_catalogo is None:
+            tam_catalogo = tamanho_peca_por_nome(nome, it.get("alt",0.0), it.get("larg",0.0))
+            if not tam_catalogo:
+                tam_catalogo = max(it.get("comp",0.0), it.get("larg",0.0), it.get("alt",0.0))
+        # se tiver cubagem, usa o maior entre “tamanho” e “m³” como ocupação aproximada
+        tam_ref = max(float(tam_catalogo or 0.0), float(it.get("cub",0.0)))
+        v_unit = calcula_valor_item(tam_ref, km_faixa_topo, valor_km, tam_caminhao)
+        v_tot  = v_unit * max(1, int(it.get("qty",1)))
+        total += v_tot
+        itens_xml.append(f"""
+      <item>
+        <codigo>{nome}</codigo>
+        <tamanho_controle>{tam_ref:.3f}</tamanho_controle>
+        <km_faixa>{km_faixa_topo}</km_faixa>
+        <valor>{v_tot:.2f}</valor>
+      </item>""")
+
+    # ajustes municipais (se houve regra aplicada)
+    if regra:
+        if regra.get("fator_mult"): total = total * float(regra["fator_mult"])
+        if regra.get("acrescimo_pct"): total = total * (1.0 + float(regra["acrescimo_pct"])/100.0)
+        if regra.get("pedagio"): total = total + float(regra["pedagio"])
+        if regra.get("min_frete") and float(regra["min_frete"]) > 0:
+            total = max(total, float(regra["min_frete"]))
+
+    total = max(total, MIN_FRETE)
+    prazo = calcular_prazo(km_faixa_topo)
+
+    if retornar_json:
+        return jsonify({
+            "ok": True,
+            "valor": round(total,2),
+            "prazo": prazo,
+            "km_real": km,
+            "km_faixa_topo": km_faixa_topo,
+            "faixa": [faixa_ini, faixa_fim],
+            "fonte_km": km_fonte,
+            "valor_km": valor_km,
+            "tam_caminhao": tam_caminhao
+        })
+
+    debug_info = (f"<debug km='{km:.1f}' fonte_km='{km_fonte}' valor_km='{valor_km}' "
+                  f"tam_caminhao='{tam_caminhao}' modo='{MODO_FAIXA}' faixa='{faixa_ini}-{faixa_fim}' km_faixa='{km_faixa_topo}'/>")
+
+    xml = f"""<?xml version="1.0"?>
+<cotacao>
+  <resultado>
+    <codigo>BAKOF</codigo>
+    <transportadora>Bakof Log</transportadora>
+    <servico>Transporte</servico>
+    <transporte>TERRESTRE</transporte>
+    <valor>{total:.2f}</valor>
+    <prazo_min>4</prazo_min>
+    <prazo_max>{prazo}</prazo_max>
+    <entrega_domiciliar>1</entrega_domiciliar>
+    <detalhes>{"".join(itens_xml)}
+    </detalhes>
+    {debug_info}
+  </resultado>
+</cotacao>"""
+    return Response(xml, mimetype="application/xml")
+
 @app.route("/")
 def index():
     return {
         "api": "Bakof Frete",
-        "versao": "3.3 - Faixas de KM (Tray)",
+        "versao": "4.0 - Municipio+FaixaCEP+UF + FaixasKM",
         "faixa_km_largura": FAIXA_KM_LARGURA,
         "modo_faixa": MODO_FAIXA,
         "tem_tabela_faixas": bool(TABELA_FAIXAS_PARS),
-        "endpoints": {"/health": "Status", "/frete": "Cotação", "/teste-distancia": "Teste KM"}
+        "endpoints": {"/health":"status","/frete":"cotacao"}
     }
 
-@app.route("/health")
-def health():
-    return {"ok": True, "cep_origem": CEP_ORIGEM, "valores": DATA["consts"]}
-
-@app.route("/teste-distancia")
-def teste_distancia():
-    a = request.args.get("a", CEP_ORIGEM)
-    b = request.args.get("b", "")
-    km, fonte, det = calcular_distancia_real(a, b)
-    (topo, ini, fim) = arredonda_para_faixa_km(km or 0.0)
-    return jsonify({"km": km, "km_faixa_topo": topo, "faixa_ini": ini, "faixa_fim": fim, "fonte": fonte, "detalhes": det})
-
-@app.route("/frete", methods=["GET", "POST"])
-def frete():
-    try:
-        params = request.form.to_dict() if request.method == "POST" else request.args.to_dict()
-        token = params.get("token", "")
-        if token != TOKEN_SECRETO:
-            return Response(build_xml_erro("Token inválido"), status=403, mimetype="text/xml; charset=utf-8")
-
-        cep_origem_param = params.get("cep_origem", CEP_ORIGEM)
-        cep_destino = params.get("cep_destino") or params.get("cep") or ""
-        prods = params.get("prods", "")
-        retornar_json = str(params.get("retorna", "")).lower() == "json"
-
-        if not cep_destino:
-            return Response(build_xml_erro("CEP destino não informado"), status=400, mimetype="text/xml; charset=utf-8")
-        if not prods and MODO_FAIXA != "tabela":
-            # no modo tabela, pode não ter itens (preço fechado por faixa)
-            return Response(build_xml_erro("Produtos não informados"), status=400, mimetype="text/xml; charset=utf-8")
-
-        # Distância real
-        km, km_fonte, detalhes = calcular_distancia_real(cep_origem_param, cep_destino)
-        if km is None:
-            uf_dest = uf_por_cep(limpar_cep(cep_destino))
-            KM_APROX_POR_UF = {"RS":150,"SC":450,"PR":700,"SP":1100,"RJ":1500,"MG":1600,"ES":1800,"MS":1600,
-                               "MT":2200,"DF":2000,"GO":2100,"TO":2500,"BA":2600,"SE":2700,"AL":2800,"PE":3000,
-                               "PB":3100,"RN":3200,"CE":3400,"PI":3300,"MA":3500,"PA":3800,"AP":4100,"AM":4200,
-                               "RO":4000,"AC":4300,"RR":4500}
-            km = KM_APROX_POR_UF.get(uf_dest, DEFAULT_KM)
-            km_fonte = f"uf_fallback_{uf_dest}" if uf_dest else "default"
-
-        # FAIXA de KM
-        km_faixa_topo, faixa_ini, faixa_fim = arredonda_para_faixa_km(km, FAIXA_KM_LARGURA)
-
-        # MODO "tabela": aplica preço fixo por faixa
-        tabela_hit = preco_por_tabela_faixas(km)
-        if tabela_hit:
-            preco_faixa, (fa_ini, fa_fim) = tabela_hit
-            total = max(MIN_FRETE, float(preco_faixa))
-            prazo = calcular_prazo(km_faixa_topo)
-            obs = f"modo=tabela; faixa={fa_ini}-{fa_fim}km; km_real={km} (fonte={km_fonte})"
-            xml = build_xml_ok("BK-EXPRESSO", "BKX", total, prazo, obs)
-            return jsonify({"ok": True, "valor": total, "prazo": prazo, "faixa": [fa_ini, fa_fim],
-                            "km_real": km, "km_faixa_topo": km_faixa_topo}) if retornar_json \
-                   else Response(xml, status=200, mimetype="text/xml; charset=utf-8")
-
-        # MODO "arredondar": mantém fórmula, mas usa km da FAIXA
-        valor_km = DATA["consts"].get("VALOR_KM", DEFAULT_VALOR_KM)
-        tam_caminhao = DATA["consts"].get("TAM_CAMINHAO", DEFAULT_TAM_CAMINHAO)
-        try:
-            if params.get("valor_km"): valor_km = float(str(params["valor_km"]).replace(",", "."))
-            if params.get("tam_caminhao"): tam_caminhao = float(str(params["tam_caminhao"]).replace(",", "."))
-        except: pass
-
-        itens = parse_prods(prods) if prods else []
-        total = 0.0
-        if not itens:
-            total = 0.0  # se cair aqui sem itens, MIN_FRETE cobre
-        else:
-            for idx, it in enumerate(itens):
-                codigo = it["codigo"] or f"Item{idx+1}"
-                # tenta usar dimensões informadas (alt/larg) como "tamanho"
-                tam_ref = tamanho_peca_por_nome(codigo, it["alt"], it["larg"])
-                tam_ref = max(tam_ref, float(it["cub"] or 0.0))  # se tiver m³, usa o maior (aprox. ocupação)
-                total += calcula_valor_item(tam_ref, km_faixa_topo, valor_km, tam_caminhao) * max(1, int(it["qty"]))
-
-        total = max(total, MIN_FRETE)
-        prazo = calcular_prazo(km_faixa_topo)
-        obs = f"modo=arredondar; faixa={faixa_ini}-{faixa_fim}km; km_real={km} (fonte={km_fonte}); km_faixa={km_faixa_topo}"
-        xml = build_xml_ok("BK-EXPRESSO", "BKX", total, prazo, obs)
-
-        return jsonify({
-            "ok": True, "valor": total, "prazo": prazo,
-            "km_real": km, "km_faixa_topo": km_faixa_topo, "faixa": [faixa_ini, faixa_fim],
-            "valor_km": valor_km, "tam_caminhao": tam_caminhao
-        }) if retornar_json else Response(xml, status=200, mimetype="text/xml; charset=utf-8")
-
-    except Exception as e:
-        print(f"[FATAL] {e}")
-        return Response(build_xml_erro(f"Falha interna: {e}"), status=500, mimetype="text/xml; charset=utf-8")
-
-# ==========================
-# MAIN
-# ==========================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    host = os.getenv("HOST", "0.0.0.0")
-    app.run(host=host, port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","8000")), debug=True)
